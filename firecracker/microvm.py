@@ -566,6 +566,9 @@ class MicroVM:
             if self._config.verbose:
                 self._logger.info("MMDS is " + ("disabled" if not self._mmds_enabled else "enabled, configuring MMDS network..."))
 
+            if not self._mmds_enabled:
+                return
+
             mmds_response = self._api.mmds_config.put(
                 version="V2",
                 ipv4_address=self._mmds_ip,
@@ -576,7 +579,21 @@ class MicroVM:
                 self._logger.debug(f"MMDS network configuration response: {mmds_response}")
                 self._logger.info("Setting MMDS data...")
 
-            mmds_data_response = self._api.mmds.put(latest=self._user_data)
+            # Prepare user data
+            user_data = {
+                "latest": {
+                    "meta-data": {
+                        "instance-id": self._microvm_id,
+                        "local-hostname": self._hostname
+                    }
+                }
+            }
+
+            # Add user data if provided
+            if self._config.user_data:
+                user_data["latest"]["user-data"] = self._config.user_data
+
+            mmds_data_response = self._api.mmds.put(**user_data)
 
             if self._config.verbose:
                 self._logger.debug(f"MMDS data response: {mmds_data_response}")

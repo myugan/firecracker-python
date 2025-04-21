@@ -25,6 +25,7 @@ class MicroVMConfig:
     host_port: int = None
     dest_port: int = None
     enable_nat: bool = False
+    user_data: str = None  # Cloud-init user data
 
     def __post_init__(self):
         """Initialize paths and download kernel if needed."""
