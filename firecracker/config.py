@@ -24,6 +24,7 @@ class MicroVMConfig:
     port_forwarding: bool = False
     host_port: int = None
     dest_port: int = None
+    enable_nat: bool = False
 
     def __post_init__(self):
         """Initialize paths and download kernel if needed."""

@@ -867,3 +867,74 @@ class NetworkManager:
             self.delete_nat_rules(tap_device)
 
         self.delete_tap(tap_device)
+
+    def enable_nat_internet_access(self, tap_name: str, iface_name: str, vm_ip: str):
+        """Enable NAT-based internet access for a MicroVM.
+
+        This method sets up the necessary NAT rules to allow the VM to access the internet
+        through the host's network interface.
+
+        Args:
+            tap_name (str): Name of the tap device.
+            iface_name (str): Name of the host network interface.
+            vm_ip (str): IP address of the VM.
+
+        Raises:
+            NetworkError: If enabling NAT internet access fails.
+        """
+        try:
+            if self._config.verbose:
+                self.logger.info(f"Enabling NAT internet access for VM {vm_ip}")
+
+            # Add basic NAT rules
+            self.add_nat_rules(tap_name, iface_name)
+
+            # Ensure masquerade rule exists for outgoing traffic
+            self.ensure_masquerade(iface_name)
+
+            # Add forwarding rules for the VM's subnet
+            rules = {
+                "nftables": [
+                    {
+                        "add": {
+                            "rule": {
+                                "family": "ip",
+                                "table": "filter",
+                                "chain": "FORWARD",
+                                "expr": [
+                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": iface_name}},
+                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": tap_name}},
+                                    {"counter": {"packets": 0, "bytes": 0}},
+                                    {"accept": None}
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        "add": {
+                            "rule": {
+                                "family": "ip",
+                                "table": "filter",
+                                "chain": "FORWARD",
+                                "expr": [
+                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": tap_name}},
+                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": iface_name}},
+                                    {"counter": {"packets": 0, "bytes": 0}},
+                                    {"accept": None}
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+
+            for rule in rules["nftables"]:
+                rc, output, error = self._nft.json_cmd({"nftables": [rule]})
+                if rc != 0 and "File exists" not in str(error):
+                    raise NetworkError(f"Failed to add NAT rule: {error}")
+
+            if self._config.verbose:
+                self.logger.info("NAT internet access enabled successfully")
+
+        except Exception as e:
+            raise NetworkError(f"Failed to enable NAT internet access: {str(e)}")

@@ -543,6 +543,14 @@ class MicroVM:
                 host_dev_name=self._host_dev_name
             )
 
+            # Enable NAT internet access if configured
+            if self._config.enable_nat:
+                self._network.enable_nat_internet_access(
+                    tap_name=self._host_dev_name,
+                    iface_name=self._iface_name,
+                    vm_ip=self._ip_addr
+                )
+
             if self._config.verbose:
                 self._logger.info("Network configuration complete")
 
