@@ -1,7 +1,9 @@
+import re
 import time
 import psutil
 import signal
 import subprocess
+from datetime import datetime
 from tenacity import Retrying, stop_after_attempt, wait_fixed
 from firecracker.utils import run, safe_kill
 from firecracker.logger import Logger
@@ -106,6 +108,7 @@ class ProcessManager:
                             if self.logger.verbose:
                                 self.logger.info(f"Killing screen session {pid_int}")
                             safe_kill(pid_int, signal.SIGKILL)
+                            time.sleep(0.5)  # Ensure the process is terminated
                         except (ProcessLookupError, ValueError) as e:
                             self.logger.warn(f"Failed to kill process {pid}: {str(e)}")
 
@@ -114,6 +117,7 @@ class ProcessManager:
             return None
 
         except Exception as e:
+            self.logger.error(f"Failed to cleanup screen session: {str(e)}")
             raise ProcessError(f"Failed to cleanup screen session: {str(e)}")
 
     @staticmethod
@@ -131,28 +135,52 @@ class ProcessManager:
             bool: True if the process is running, False otherwise
         """
         try:
+            screen_process = run(f"screen -ls | grep {id} | head -1")
+            if screen_process.returncode == 0:
+                screen_output = screen_process.stdout.strip()
+                if "Dead" in screen_output:
+                    if self.logger.verbose:
+                        self.logger.info(f"Process VMM {id} is dead")
+                    return False
+
+                match = re.search(r'\d+', screen_output)
+                if match:
+                    screen_pid = match.group(0)
+                    if screen_pid:
+                        process = psutil.Process(int(screen_pid))
+                        if self.logger.verbose:
+                            self.logger.info(f"Process VMM {id} is running with PID: {screen_pid}")
+                        return process.is_running()
+            return False
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+            return False
+
+    def get_pids(self, id: str):
+        """Get the PIDs of all running Firecracker processes."""
+        try:
             screen_process = run(f"screen -ls | grep {id} | head -1 | awk '{{print $1}}' | cut -d. -f1")
             if screen_process.returncode == 0:
                 screen_pid = screen_process.stdout.strip()
                 if screen_pid:
                     process = psutil.Process(int(screen_pid))
-                    return process.is_running()
-            return False
+                    pid = process.pid
+                    create_time = datetime.fromtimestamp(
+                        process.create_time()
+                    ).strftime('%Y-%m-%d %H:%M:%S')
+                    return pid, create_time
+
         except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
             return False
 
-    def get_firecracker_pids_and_commands(self):
-        """Get the PIDs and commands of all running Firecracker processes."""
-        try:    
-            firecracker_processes = []
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                try:
-                    if proc.info['cmdline'] and any('firecracker' in arg for arg in proc.info['cmdline']):
-                        firecracker_processes.append((proc.info['pid'], ' '.join(proc.info['cmdline'])))
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
-
-            return firecracker_processes
+    def get_all_pids(self):
+        """Get the PIDs of all running processes."""
+        try:
+            pids = run("screen -ls | grep 'fc_' | awk '{print $1}' | cut -d. -f1")
+            pid_list = []
+            for pid in pids.stdout.strip().splitlines():
+                pid_list.append(int(pid))
+            return pid_list
 
         except Exception as e:
-            raise ProcessError(f"Failed to get Firecracker PIDs and commands: {str(e)}")
+            raise ProcessError(f"Failed to get all PIDs: {str(e)}")

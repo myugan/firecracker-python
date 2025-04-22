@@ -1,9 +1,7 @@
 import os
 import re
-import psutil
-from datetime import datetime
+import json
 from typing import List, Dict
-from firecracker.utils import run
 from firecracker.logger import Logger
 from firecracker.api import Api
 from firecracker.config import MicroVMConfig
@@ -35,40 +33,132 @@ class VMMManager:
         socket_file = f"{self._config.data_path}/{id}/firecracker.socket"
         return Api(socket_file)
 
-    def list_vmms(self) -> List[Dict]:
-        """List all running Firecracker VMMs with their details."""
+    def create_vmm_json_file(self, id: str, **kwargs):
+        """Create a JSON file for a VMM.
+
+        Args:
+            file_path (str): Path to the JSON file to create
+            **kwargs: Keyword arguments for the VMM
+        """
+        vm_data = {
+            "ID": kwargs.get("ID", id),
+            "Name": kwargs.get("Name", ""),
+            "CreatedAt": kwargs.get("CreatedAt", ""),
+            "Rootfs": kwargs.get("Rootfs", self._config.base_rootfs),
+            "Kernel": kwargs.get("Kernel", self._config.kernel_file),
+            "State": {
+                "Pid": kwargs.get("Pid", ""),
+                "Running": kwargs.get("Running", True),
+                "Paused": kwargs.get("Paused", False),
+            },
+            "Network": {
+                f"tap_{id}": {
+                    "IPAddress": kwargs.get("IPAddress", "")
+                }
+            },
+            "Ports": kwargs.get("Ports", {}),
+            "Labels": kwargs.get("Labels", {}),
+            "WorkingDir": kwargs.get("WorkingDir", "/root"),
+            "LogPath": kwargs.get("LogPath", f"/var/lib/firecracker/{id}/logs")
+        }
+
+        file_path = f"{self._config.data_path}/{id}/config.json"
+        with open(file_path, 'w') as json_file:
+            json.dump(vm_data, json_file, indent=4)
+
+        return file_path
+
+    def list_vmm(self) -> List[Dict]:
+        """List all VMMs using their config.json files.
+
+        Returns:
+            List[Dict]: List of dictionaries containing VMM details
+        """
+        vmm_list = []
+        running_pids = self._process.get_all_pids()
+
+        for vmm_id in os.listdir(self._config.data_path):
+            vmm_path = os.path.join(self._config.data_path, vmm_id)
+            if not os.path.isdir(vmm_path):
+                continue
+            config_path = os.path.join(vmm_path, 'config.json')
+
+            if not os.path.exists(config_path):
+                self._logger.info(f"Config file not found for VMM ID: {vmm_id}")
+                continue
+
+            with open(config_path, 'r') as config_file:
+                config_data = json.load(config_file)
+                pid = config_data['State']['Pid']
+
+                if pid in running_pids:
+                    vmm_info = {
+                        "id": config_data['ID'],
+                        "name": config_data['Name'],
+                        "pid": pid,
+                        "ip_addr": config_data['Network'][f"tap_{vmm_id}"]["IPAddress"],
+                        "state": 'Running' if config_data['State']['Running'] else 'Paused',
+                        "created_at": config_data['CreatedAt']
+                    }
+                    vmm_list.append(vmm_info)
+
+        return vmm_list
+
+    def find_vmm_by_id(self, id: str) -> str:
+        """Find a VMM by ID and return its ID.
+
+        Args:
+            id (str): ID of the VMM to find
+
+        Returns:
+            str: ID of the found VMM or error message
+        """
         try:
-            vmm_list = []
-            screen_process = run("screen -ls || true")
-            pattern = r'(\d+)\.fc_([^\s]+)'
-            matches = re.findall(pattern, screen_process.stdout)
+            vmm_list = self.list_vmm()
+            for vmm_info in vmm_list:
+                if vmm_info['id'] == id:
+                    return vmm_info['id']
 
-            if not matches:
-                return []
-
-            for pid, session_name in matches:
-                fc_pid = int(pid)
-                vmm_id = session_name
-
-                process = psutil.Process(fc_pid)
-                ip_addr = self.get_vmm_ip_addr(vmm_id)
-                state = self.get_vmm_state(vmm_id)
-                create_time = datetime.fromtimestamp(
-                    process.create_time()
-                ).strftime('%Y-%m-%d %H:%M:%S')
-
-                vmm_list.append({
-                    'id': vmm_id,
-                    'pid': fc_pid,
-                    'ip_addr': ip_addr,
-                    'state': state,
-                    'created_at': create_time
-                })
-
-            return vmm_list
+            return f"VMM with ID {id} not found"
 
         except Exception as e:
-            raise VMMError(f"Error listing VMMs: {str(e)}")
+            raise VMMError(f"Error finding VMM by ID: {str(e)}")
+
+    def find_vmm_by_labels(self, state: str, labels: Dict[str, str]) -> List[str]:
+        """Find VMMs by state (Running or Paused) and multiple labels, and return their IDs.
+
+        Args:
+            state (str): State to filter by ('Running' or 'Paused')
+            labels (Dict[str, str]): Dictionary of labels to search for
+
+        Returns:
+            List[str]: List of VMM IDs that match the state and all the labels
+        """
+        try:
+            matching_vmm_ids = []
+            vmm_list = self.list_vmm()
+            for vmm_info in vmm_list:
+                if vmm_info['state'] not in [state]:
+                    continue
+                config_path = os.path.join(self._config.data_path, vmm_info['id'], 'config.json')
+                if not os.path.exists(config_path):
+                    continue
+                with open(config_path, 'r') as config_file:
+                    config_data = json.load(config_file)
+                    if all(config_data['Labels'].get(key) == value for key, value in labels.items()):
+                        vmm_info = {
+                            'id': config_data['ID'],
+                            'name': config_data['Name'],
+                            'state': "Running" if config_data['State']['Running'] else "Paused",
+                            'created_at': config_data['CreatedAt'],
+                        }
+
+                        matching_vmm_ids.append(vmm_info)
+
+            return matching_vmm_ids
+
+        except Exception as e:
+            raise VMMError(f"Error finding VMM by labels: {str(e)}")
 
     def update_vmm_state(self, id: str, state: str) -> str:
         """Update VM state (pause/resume).
@@ -94,7 +184,8 @@ class VMMManager:
             raise VMMError(f"Failed to {state.lower()} VMM {id}: {str(e)}")
 
         finally:
-            api.close()
+            if api:
+                api.close()
 
     @requires_id
     def get_vmm_config(self, id: str) -> Dict:
@@ -152,7 +243,8 @@ class VMMManager:
             raise VMMError(f"Failed to get state for VMM {id}: {str(e)}")
 
         finally:
-            api.close()
+            if api:
+                api.close()
 
     def get_vmm_ip_addr(self, id: str) -> str:
         """Get the IP address of a specific VMM.
@@ -168,7 +260,7 @@ class VMMManager:
                       retries
         """
         try:
-            api = self.get_api(id,)
+            api = self.get_api(id)
             vmm_config = api.vm_config.get().json()
             boot_args = vmm_config.get('boot-source', {}).get('boot_args', '')
 
@@ -191,6 +283,21 @@ class VMMManager:
 
         finally:
             api.close()
+
+    def check_network_overlap(self, ip_addr: str) -> bool:
+        """Check if the network configuration overlaps with another VMM.
+
+        Returns:
+            bool: True if the IP address overlaps, False otherwise.
+        """
+        try:
+            vmm_list = self.list_vmm()
+            list_of_ips = [vmm_info['ip_addr'] for vmm_info in vmm_list if 'ip_addr' in vmm_info]
+
+            return ip_addr in list_of_ips
+
+        except Exception as e:
+            raise VMMError(f"Error checking network overlap: {str(e)}")
 
     def create_vmm_dir(self, path: str):
         """Create directories for the microVM.
@@ -236,62 +343,51 @@ class VMMManager:
             id (str): ID of the VMM to delete
         """
         import shutil
-
+        
         try:
             vmm_dir = f"{self._config.data_path}/{id}"
 
             if os.path.exists(vmm_dir):
+                if self._config.verbose:
+                    self._logger.info(f"Deleting directory {vmm_dir} and its contents")
                 shutil.rmtree(vmm_dir)
-
-            if self._config.verbose:
-                self._logger.info(f"Directory {vmm_dir} removed")
+                if self._config.verbose:
+                    self._logger.info(f"Directory {vmm_dir} is removed")
 
         except Exception as e:
+            self._logger.error(f"Failed to remove {vmm_dir} directory: {str(e)}")
             raise VMMError(f"Failed to remove {vmm_dir} directory: {str(e)}")
 
-    def delete_vmms(self, vmm_id: str = None) -> str:
-        """Delete VMM instances.
-
-        Args:
-            vmm_id (str, optional): ID of the VMM to delete. If None, delete all VMMs.
+    def delete_vmm(self, id: str = None) -> List[Dict]:
+        """Delete VMM instances from the config.json file.
 
         Returns:
-            str: Status message indicating success or failure
+            List[Dict]: List of dictionaries containing VMM details
         """
-        try:
-            if self._config.verbose:
-                if vmm_id:
-                    self._logger.info(f"Deleting VMM {vmm_id}")
-                else:
-                    self._logger.info("Deleting all VMMs")
+        vmm_list = self.list_vmm()
 
-            vmm_list = self.list_vmms()
+        if id:
+            if not any(vmm['id'] == id for vmm in vmm_list):
+                return f"VMM with ID {id} not found"
+            ids = [id]
+        else:
+            ids = [vmm['id'] for vmm in vmm_list]
 
-            if vmm_id:
-                if not any(vmm['id'] == vmm_id for vmm in vmm_list):
-                    return f"VMM with ID {vmm_id} not found"
-                vmm_ids = [vmm_id]
-            else:
-                vmm_ids = [vmm['id'] for vmm in vmm_list]
+        for id in ids:
+            self.cleanup_resources(id)
 
-            for vmm_id in vmm_ids:
-                self.cleanup_resources(vmm_id)
-
-        except Exception as e:
-            raise VMMError(f"Error deleting VMM(s): {str(e)}")
-
-    def cleanup_resources(self, vmm_id=None):
+    def cleanup_resources(self, id=None):
         """Clean up network and process resources for a VMM."""
         try:
             if self._config.verbose:
-                self._logger.info(f"Cleaning up VMM {vmm_id}")
+                self._logger.info(f"Cleaning up VMM {id}")
 
-            self._process.cleanup_screen_session(f"fc_{vmm_id}")
-            self._network.cleanup(f"tap_{vmm_id}")
-            self.delete_vmm_dir(vmm_id)
+            self._process.cleanup_screen_session(f"fc_{id}")
+            self._network.cleanup(f"tap_{id}")
+            self.delete_vmm_dir(id)
 
         except Exception as e:
-            raise VMMError(f"Failed to cleanup VMM {vmm_id}: {str(e)}") from e
+            raise VMMError(f"Failed to cleanup VMM {id}: {str(e)}") from e
 
     def _ensure_socket_file(self, vmm_id: str) -> str:
         """Ensure the socket file is ready for use, unlinking if necessary.

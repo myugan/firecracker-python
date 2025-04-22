@@ -2,9 +2,9 @@ import sys
 import ipaddress
 from pyroute2 import IPRoute
 from firecracker.logger import Logger
-from firecracker.utils import run, get_public_ip
+from firecracker.utils import run
 from firecracker.config import MicroVMConfig
-from firecracker.exceptions import VMMError, NetworkError, ConfigurationError
+from firecracker.exceptions import NetworkError, ConfigurationError
 from ipaddress import IPv4Address, AddressValueError
 sys.path.append('/usr/lib/python3/dist-packages')
 try:
@@ -477,7 +477,7 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to get nftables rules: {str(e)}")
 
-    def add_port_forward(self, id: str, host_ip: str, host_port: int, dest_ip: str, dest_port: int):
+    def add_port_forward(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int, protocol: str = "tcp"):
         """Port forward a port to a new IP and port.
 
         Args:
@@ -624,7 +624,7 @@ class NetworkManager:
                                     "op": "==",
                                     "left": {
                                         "payload": {
-                                            "protocol": "tcp",
+                                            "protocol": protocol,
                                             "field": "dport"
                                         }
                                     },
@@ -822,37 +822,6 @@ class NetworkManager:
                 ipr.link('del', index=idx)
                 if self._config.verbose:
                     self.logger.info(f"Removed tap device {name}")
-
-    def forward_port(self, id: str, host_ip: str, host_port: int, dest_ip: str, dest_port: int):
-        """Forward a port from the host to the microVM and maintain the connection until interrupted.
-
-        Args:
-            host_port (int): Port on the host to forward.
-            dest_port (int): Port on the destination.
-            id (str, optional): ID of the VMM to forward ports to. If not provided, uses the last created VMM.
-
-        Raises:
-            VMMError: If VMM IP address cannot be found or port forwarding fails.
-            ValueError: If the provided ports are not valid port numbers.
-        """
-        try:
-            if not (1 <= host_port <= 65535) or not (1 <= dest_port <= 65535):
-                raise NetworkError("Ports must be integers between 1 and 65535.")
-
-            if host_port < 1024:
-                raise NetworkError(f"Host port {host_port} is a privileged port. Please use ports above 1024.")
-
-            if not id:
-                raise VMMError("No VMM ID provided and no VMM has been created yet")
-
-            if not dest_ip:
-                raise VMMError(f"Could not find IP address for VMM {id}, please check if the VMM is running")
-
-            host_ip = get_public_ip()
-            self.add_port_forward(id, host_ip, host_port, dest_ip, dest_port)
-
-        except Exception as e:
-            raise NetworkError(f"Failed to forward port: {str(e)}")
 
     def cleanup(self, tap_device: str):
         """Clean up network resources including tap device and firewall rules using nftables.

@@ -5,6 +5,7 @@ import signal
 import requests
 import subprocess
 import socket
+from faker import Faker
 
 
 def run(cmd, **kwargs):
@@ -60,6 +61,17 @@ def generate_id() -> str:
     chars = string.ascii_lowercase + string.digits
     generated_id = ''.join(random.choice(chars) for _ in range(8))
     return generated_id
+
+
+def generate_name() -> str:
+    """Generate a random name for the MicroVM instance using Faker.
+
+    Returns:
+        str: A random name
+    """
+    fake = Faker()
+    generated_name = fake.name().replace(' ', '_').lower()
+    return generated_name
 
 
 def requires_id(func):

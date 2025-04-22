@@ -24,4 +24,7 @@ def check_firecracker_binary():
 
 
 if __name__ == "__main__":
+    if os.geteuid() != 0:
+        raise SystemExit("This script must be run as root.")
+
     check_firecracker_binary()
