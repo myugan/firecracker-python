@@ -16,7 +16,8 @@ dependencies = [
     "tenacity==9.0.0",
     "psutil==7.0.0",
     "pyroute2==0.8.1",
-    "paramiko==3.5.1"
+    "paramiko==3.5.1",
+    "faker==37.0.2"
 ]
 license = {file = "LICENSE"}
 readme = "README.md"
@@ -35,3 +36,11 @@ firecracker-check = "firecracker.scripts:check_firecracker_binary"
 
 [tool.setuptools_scm]
 write_to = "firecracker/_version.py"
+
+[tool.coverage.run]
+omit = [
+    "/usr/lib/python3/dist-packages/nftables/*",
+    "firecracker/_version.py",
+    "tests/conftest.py",
+    "tests/test_microvm.py"
+]
