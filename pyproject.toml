@@ -9,7 +9,7 @@ description = "A Python client library to interact with Firecracker microVMs"
 authors = [
     {name = "Muhammad Yuga Nugraha"}
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
     "requests==2.32.3",
     "requests-unixsocket==0.4.1",
@@ -17,7 +17,9 @@ dependencies = [
     "psutil==7.0.0",
     "pyroute2==0.8.1",
     "paramiko==3.5.1",
-    "faker==37.0.2"
+    "faker==37.0.2",
+    "typer>=0.15.2",
+    "rich>=14.0.0",
 ]
 license = {file = "LICENSE"}
 readme = "README.md"
@@ -32,6 +34,7 @@ classifiers = [
 ]
 
 [project.scripts]
+pyfirecracker = "firecracker.cli:main"
 firecracker-check = "firecracker.scripts:check_firecracker_binary"
 
 [tool.setuptools_scm]
