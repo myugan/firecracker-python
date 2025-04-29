@@ -4,3 +4,4 @@ tenacity==9.0.0
 psutil==7.0.0
 pyroute2==0.8.1
 paramiko==3.5.1
+faker==37.0.2
