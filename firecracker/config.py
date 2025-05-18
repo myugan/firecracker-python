@@ -23,5 +23,5 @@ class MicroVMConfig:
     expose_ports: bool = False
     host_port: int = None
     dest_port: int = None
-    enable_nat: bool = False
+    enable_nat: bool = True
     user_data: str = None  # Cloud-init user data
