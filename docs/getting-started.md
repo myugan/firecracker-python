@@ -63,7 +63,7 @@ FROM ubuntu:24.04
 
 COPY ubuntu-24.04.pub /root/.ssh/authorized_keys
 RUN apt-get update && \
-    apt-get install -y systemd systemd-sysv init net-tools iputils-ping openssh-server file iproute2 curl nano vim dnsutils && \
+    apt-get install -y systemd systemd-sysv init net-tools iputils-ping openssh-server file iproute2 curl nano vim dnsutils cloud-init && \
     touch /root/.hushlogin
 EOF
 ```
