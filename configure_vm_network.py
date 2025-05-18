@@ -9,7 +9,6 @@ both automatically (using the modified boot args) and manually (using execute_in
 import time
 import sys
 from firecracker.microvm import MicroVM
-from firecracker.vmm import VMMManager
 from firecracker.exceptions import VMMError
 
 def create_vm_with_network():
@@ -17,7 +16,6 @@ def create_vm_with_network():
     print("Creating new VM with networking enabled...")
     vmm = MicroVM(
         name="network-test-vm",
-        enable_nat=True,  # Enable NAT for internet access
         verbose=True      # Enable verbose logging
     )
     
@@ -52,8 +50,8 @@ def create_vm_with_network():
     
     # Print connection information
     print("\nVM Network Information:")
-    print(f"VM IP Address: 172.16.0.2")
-    print(f"Host Address: 172.16.0.1")
+    print("VM IP Address: 172.16.0.2")
+    print("Host Address: 172.16.0.1")
     print("\nTo connect to the VM using screen:")
     print(f"  screen -r fc_{vm_id}")
     print("\nTo detach from the screen session (leave VM running):")
@@ -83,7 +81,7 @@ def connect_to_existing_vm(vm_id):
     
     # Print SSH connection info
     print("\nTo connect to the VM via SSH (once networking is configured):")
-    print(f"  ssh -i /path/to/your/ssh_key root@172.16.0.2")
+    print("  ssh -i /path/to/your/ssh_key root@172.16.0.2")
 
 if __name__ == "__main__":
     # Check if VM ID is provided as argument

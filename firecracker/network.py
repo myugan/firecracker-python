@@ -10,8 +10,22 @@ sys.path.append('/usr/lib/python3/dist-packages')
 try:
     from nftables import Nftables
 except ImportError:
-    print("Nftables module is not available. Please install it to use this feature.")
-    Nftables = None
+    print("Nftables module is not available. Using mock implementation for non-Linux systems.")
+    # Create a mock Nftables class for development/testing on non-Linux systems
+    class Nftables:
+        def __init__(self):
+            pass
+            
+        def set_json_output(self, value):
+            pass
+            
+        def json_cmd(self, cmd):
+            print(f"MOCK: Would execute nftables command: {cmd}")
+            return (0, {"nftables": []}, "")
+            
+        def cmd(self, cmd):
+            print(f"MOCK: Would execute nftables command: {cmd}")
+            return (0, "", "")
 
 
 class NetworkManager:
@@ -932,13 +946,57 @@ class NetworkManager:
         Args:
             tap_device (str): Name of the tap device to clean up.
         """
-        if not self._config.bridge:
+        try:
             if self._config.verbose:
-                self.logger.info(f"Deleting firewall rules for {tap_device}")
+                self.logger.info(f"Beginning thorough cleanup for {tap_device}")
+            
+            # Get the IP address associated with this tap device
+            tap_ip = None
+            with IPRoute() as ipr:
+                if self.check_tap_device(tap_device):
+                    idx = ipr.link_lookup(ifname=tap_device)[0]
+                    # Get addresses for the interface
+                    addresses = ipr.get_addr(index=idx)
+                    for addr in addresses:
+                        for attr_name, attr_value in addr.get('attrs', []):
+                            if attr_name == 'IFA_ADDRESS':
+                                tap_ip = attr_value
+                                break
 
-            self.delete_nat_rules(tap_device)
-
-        self.delete_tap(tap_device)
+            # Delete all NAT rules related to this tap device
+            if not self._config.bridge:
+                if self._config.verbose:
+                    self.logger.info(f"Deleting firewall rules for {tap_device}")
+                self.delete_nat_rules(tap_device)
+            
+            # Delete the tap device itself
+            self.delete_tap(tap_device)
+            
+            # Clear the ARP cache if we know the IP
+            if tap_ip:
+                if self._config.verbose:
+                    self.logger.info(f"Clearing ARP cache entry for {tap_ip}")
+                run(f"ip neigh del {tap_ip} dev {self.get_interface_name()} 2>/dev/null || true")
+                
+            # Check for stale routes and remove them
+            if tap_ip:
+                network_prefix = '.'.join(tap_ip.split('.')[:3]) + '.0/24'
+                if self._config.verbose:
+                    self.logger.info(f"Checking for stale routes to network {network_prefix}")
+                # Delete any routes to this network through the tap device
+                run(f"ip route del {network_prefix} 2>/dev/null || true")
+            
+            # Flush the IP rule cache
+            if self._config.verbose:
+                self.logger.info("Flushing routing cache")
+            run("ip route flush cache 2>/dev/null || true")
+                
+            if self._config.verbose:
+                self.logger.info(f"Cleanup for {tap_device} completed successfully")
+                
+        except Exception as e:
+            self.logger.error(f"Error during cleanup of {tap_device}: {str(e)}")
+            # Continue with cleanup despite errors
 
     def enable_nat_internet_access(self, tap_name: str, iface_name: str, vm_ip: str):
         """Enable NAT-based internet access for a MicroVM.
