@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-from firecracker import MicroVM
 import time
 import requests
+from firecracker import MicroVM
 
 def create_test_vm():
     """Create a test MicroVM with DNS configuration."""
@@ -22,7 +22,7 @@ runcmd:
     # Create VM configuration
     vm = MicroVM(
         id='test-vm',
-        enable_nat=True,
+        nat_enabled=True,
         ip_addr='172.16.0.2',
         mmds_enabled=True,
         user_data=user_data,
@@ -73,4 +73,4 @@ runcmd:
         vm.delete()
 
 if __name__ == "__main__":
-    create_test_vm() 
+    create_test_vm()
