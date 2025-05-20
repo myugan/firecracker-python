@@ -505,6 +505,59 @@ class MicroVM:
         except Exception as e:
             raise VMMError(str(e))
 
+    def execute_in_vm(self, id=None, commands=None):
+        """Execute commands in the VM console through the screen session.
+        
+        This method allows sending commands directly to the VM's console, which is useful
+        for configuring networking when SSH is not available.
+        
+        Args:
+            id (str, optional): VM ID. If not provided, uses the current VM ID.
+            commands (list): List of commands to execute in the VM console
+            
+        Returns:
+            bool: Success status
+            
+        Raises:
+            VMMError: If the command execution fails
+        """
+        if not commands:
+            return False
+        
+        id = id if id else self._microvm_id
+        session_name = f"fc_{id}"
+        
+        if self._config.verbose:
+            self._logger.info(f"Executing commands in VM {id} console")
+        
+        try:
+            # Prepare the commands with newlines
+            cmd_string = "\n".join(commands) + "\n"
+            
+            # Write commands to a temp file
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp:
+                temp_path = temp.name
+                temp.write(cmd_string)
+            
+            # Use screen's stuff command to send commands to the VM
+            stuff_cmd = f"screen -S {session_name} -X stuff $'$(cat {temp_path})'"
+            result = run(stuff_cmd)
+            
+            # Clean up temp file
+            import os
+            os.unlink(temp_path)
+            
+            if result.returncode == 0:
+                if self._config.verbose:
+                    self._logger.info(f"Successfully executed commands in VM {id}")
+                return True
+            else:
+                raise VMMError(f"Failed to execute commands in VM {id}: {result.stderr}")
+        
+        except Exception as e:
+            raise VMMError(f"Failed to execute commands in VM {id}: {str(e)}")
+
     def _parse_ports(self, port_value, default_value=None):
         """Parse port values from various input formats.
 
@@ -571,13 +624,13 @@ class MicroVM:
                 "console=ttyS0 reboot=k panic=1 "
                 f"ds=nocloud-net;s=http://{self._mmds_ip}/latest/ "
                 f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
-                f"{self._microvm_name}:{self._iface_name}:off "
+                f"{self._microvm_name}:{self._iface_name}:on "
             )
         else:
             return (
                 "console=ttyS0 reboot=k panic=1 "
                 f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
-                f"{self._microvm_name}:{self._iface_name}:off "
+                f"{self._microvm_name}:{self._iface_name}:on "
             )
 
     def _configure_vmm_boot_source(self):
@@ -660,6 +713,14 @@ class MicroVM:
                 host_dev_name=self._host_dev_name
             )
 
+            # Enable NAT internet access if configured
+            if self._config.enable_nat:
+                self._network.enable_nat_internet_access(
+                    tap_name=self._host_dev_name,
+                    iface_name=self._iface_name,
+                    vm_ip=self._ip_addr
+                )
+
             if self._config.verbose:
                 self._logger.info("Network configuration complete")
 
@@ -675,6 +736,9 @@ class MicroVM:
             if self._config.verbose:
                 self._logger.info("MMDS is " + ("disabled" if not self._mmds_enabled else "enabled, configuring MMDS network..."))
 
+            if not self._mmds_enabled:
+                return
+
             mmds_response = self._api.mmds_config.put(
                 version="V2",
                 ipv4_address=self._mmds_ip,
@@ -685,7 +749,21 @@ class MicroVM:
                 self._logger.debug(f"MMDS network configuration response: {mmds_response}")
                 self._logger.info("Setting MMDS data...")
 
-            mmds_data_response = self._api.mmds.put(latest=self._user_data)
+            # Prepare user data
+            user_data = {
+                "latest": {
+                    "meta-data": {
+                        "instance-id": self._microvm_id,
+                        "local-hostname": self._hostname
+                    }
+                }
+            }
+
+            # Add user data if provided
+            if self._config.user_data:
+                user_data["latest"]["user-data"] = self._config.user_data
+
+            mmds_data_response = self._api.mmds.put(**user_data)
 
             if self._config.verbose:
                 self._logger.debug(f"MMDS data response: {mmds_data_response}")

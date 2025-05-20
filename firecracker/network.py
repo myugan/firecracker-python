@@ -5,13 +5,27 @@ from firecracker.logger import Logger
 from firecracker.utils import run
 from firecracker.config import MicroVMConfig
 from firecracker.exceptions import NetworkError, ConfigurationError
-from ipaddress import IPv4Address, AddressValueError
+from ipaddress import IPv4Address, IPv4Network, AddressValueError
 sys.path.append('/usr/lib/python3/dist-packages')
 try:
     from nftables import Nftables
 except ImportError:
-    print("Nftables module is not available. Please install it to use this feature.")
-    Nftables = None
+    print("Nftables module is not available. Using mock implementation for non-Linux systems.")
+    # Create a mock Nftables class for development/testing on non-Linux systems
+    class Nftables:
+        def __init__(self):
+            pass
+            
+        def set_json_output(self, value):
+            pass
+            
+        def json_cmd(self, cmd):
+            print(f"MOCK: Would execute nftables command: {cmd}")
+            return (0, {"nftables": []}, "")
+            
+        def cmd(self, cmd):
+            print(f"MOCK: Would execute nftables command: {cmd}")
+            return (0, "", "")
 
 
 class NetworkManager:
@@ -735,6 +749,98 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to delete port forward rules: {str(e)}")
 
+    def detect_cidr_conflict(self, ip_address: str, prefix_len: int = 24) -> bool:
+        """Check if the given IP address and prefix length conflict with existing interfaces.
+        
+        Args:
+            ip_address (str): IP address to check for conflicts
+            prefix_len (int): Network prefix length (default 24 for /24 networks)
+            
+        Returns:
+            bool: True if a conflict exists, False otherwise
+            
+        Raises:
+            NetworkError: If the IP address format is invalid
+        """
+        try:
+            # Create network object from the given IP and prefix
+            new_network = IPv4Network(f"{ip_address}/{prefix_len}", strict=False)
+            
+            with IPRoute() as ipr:
+                # Get all interfaces
+                interfaces = ipr.get_links()
+                
+                for interface in interfaces:
+                    idx = interface['index']
+                    # Get addresses for each interface
+                    addresses = ipr.get_addr(index=idx)
+                    
+                    for addr in addresses:
+                        for attr_name, attr_value in addr.get('attrs', []):
+                            if attr_name == 'IFA_ADDRESS':
+                                # Skip IPv6 addresses
+                                if ':' in attr_value:
+                                    continue
+                                
+                                existing_prefix = addr.get('prefixlen', 24)
+                                existing_network = IPv4Network(
+                                    f"{attr_value}/{existing_prefix}", 
+                                    strict=False
+                                )
+                                
+                                # Check for network overlap
+                                if new_network.overlaps(existing_network):
+                                    if self._config.verbose:
+                                        self.logger.warn(
+                                            f"CIDR conflict detected: {new_network} "
+                                            f"overlaps with existing {existing_network}"
+                                        )
+                                    return True
+            
+            return False
+            
+        except (AddressValueError, ValueError) as e:
+            raise NetworkError(f"Invalid IP address format: {str(e)}")
+        except Exception as e:
+            raise NetworkError(f"Failed to check CIDR conflicts: {str(e)}")
+            
+    def suggest_non_conflicting_ip(self, preferred_ip: str, prefix_len: int = 24) -> str:
+        """Suggest a non-conflicting IP address based on the preferred IP.
+        
+        Args:
+            preferred_ip (str): Preferred IP address
+            prefix_len (int): Network prefix length
+            
+        Returns:
+            str: A non-conflicting IP address
+            
+        Raises:
+            NetworkError: If unable to find non-conflicting IP
+        """
+        try:
+            # Start with the preferred network
+            ip_obj = ipaddress.ip_address(preferred_ip)
+            
+            # Try up to 10 alternative networks by incrementing the third octet
+            for i in range(10):
+                # Calculate a new network address with incremented third octet
+                if isinstance(ip_obj, IPv4Address):
+                    # Extract octets
+                    octets = str(ip_obj).split('.')
+                    # Increment third octet and wrap around if needed
+                    new_third_octet = (int(octets[2]) + i + 1) % 256
+                    new_ip = f"{octets[0]}.{octets[1]}.{new_third_octet}.{octets[3]}"
+                    
+                    if not self.detect_cidr_conflict(new_ip, prefix_len):
+                        if self._config.verbose:
+                            self.logger.info(f"Suggested non-conflicting IP: {new_ip}")
+                        return new_ip
+            
+            raise NetworkError("Unable to find a non-conflicting IP address")
+            
+        except Exception as e:
+            raise NetworkError(f"Failed to suggest non-conflicting IP: {str(e)}")
+
     def create_tap(self, name: str = None, iface_name: str = None,
                    gateway_ip: str = None, bridge: bool = False) -> None:
         """Create and configure a new tap device using pyroute2.
@@ -743,7 +849,7 @@ class NetworkManager:
             iface_name (str, optional): Name of the interface for firewall rules.
             name (str, optional): Name for the new tap device.
             gateway_ip (str, optional): IP address to be assigned to the tap device.
-            bridge_name (str, optional): Name of the bridge to attach the tap device to.
+            bridge (bool): Whether to use bridge mode.
 
         Raises:
             NetworkError: If tap device creation or configuration fails.
@@ -778,6 +884,17 @@ class NetworkManager:
 
                     if gateway_ip:
                         try:
+                            # Check for CIDR conflicts
+                            if self.detect_cidr_conflict(gateway_ip, 24):
+                                # Attempt to find a non-conflicting IP
+                                alternative_ip = self.suggest_non_conflicting_ip(gateway_ip, 24)
+                                if self._config.verbose:
+                                    self.logger.warn(
+                                        f"IP conflict detected with {gateway_ip}. "
+                                        f"Using alternative: {alternative_ip}"
+                                    )
+                                gateway_ip = alternative_ip
+                                
                             ipr.addr('add', index=idx, address=gateway_ip, prefixlen=24)
                             if self._config.verbose:
                                 self.logger.info(f"Set {gateway_ip} as gateway on tap device {name}")
@@ -829,10 +946,125 @@ class NetworkManager:
         Args:
             tap_device (str): Name of the tap device to clean up.
         """
-        if not self._config.bridge:
+        try:
             if self._config.verbose:
-                self.logger.info(f"Deleting firewall rules for {tap_device}")
+                self.logger.info(f"Beginning thorough cleanup for {tap_device}")
+            
+            # Get the IP address associated with this tap device
+            tap_ip = None
+            with IPRoute() as ipr:
+                if self.check_tap_device(tap_device):
+                    idx = ipr.link_lookup(ifname=tap_device)[0]
+                    # Get addresses for the interface
+                    addresses = ipr.get_addr(index=idx)
+                    for addr in addresses:
+                        for attr_name, attr_value in addr.get('attrs', []):
+                            if attr_name == 'IFA_ADDRESS':
+                                tap_ip = attr_value
+                                break
 
-            self.delete_nat_rules(tap_device)
+            # Delete all NAT rules related to this tap device
+            if not self._config.bridge:
+                if self._config.verbose:
+                    self.logger.info(f"Deleting firewall rules for {tap_device}")
+                self.delete_nat_rules(tap_device)
+            
+            # Delete the tap device itself
+            self.delete_tap(tap_device)
+            
+            # Clear the ARP cache if we know the IP
+            if tap_ip:
+                if self._config.verbose:
+                    self.logger.info(f"Clearing ARP cache entry for {tap_ip}")
+                run(f"ip neigh del {tap_ip} dev {self.get_interface_name()} 2>/dev/null || true")
+                
+            # Check for stale routes and remove them
+            if tap_ip:
+                network_prefix = '.'.join(tap_ip.split('.')[:3]) + '.0/24'
+                if self._config.verbose:
+                    self.logger.info(f"Checking for stale routes to network {network_prefix}")
+                # Delete any routes to this network through the tap device
+                run(f"ip route del {network_prefix} 2>/dev/null || true")
+            
+            # Flush the IP rule cache
+            if self._config.verbose:
+                self.logger.info("Flushing routing cache")
+            run("ip route flush cache 2>/dev/null || true")
+                
+            if self._config.verbose:
+                self.logger.info(f"Cleanup for {tap_device} completed successfully")
+                
+        except Exception as e:
+            self.logger.error(f"Error during cleanup of {tap_device}: {str(e)}")
+            # Continue with cleanup despite errors
 
-        self.delete_tap(tap_device)
+    def enable_nat_internet_access(self, tap_name: str, iface_name: str, vm_ip: str):
+        """Enable NAT-based internet access for a MicroVM.
+
+        This method sets up the necessary NAT rules to allow the VM to access the internet
+        through the host's network interface.
+
+        Args:
+            tap_name (str): Name of the tap device.
+            iface_name (str): Name of the host network interface.
+            vm_ip (str): IP address of the VM.
+
+        Raises:
+            NetworkError: If enabling NAT internet access fails.
+        """
+        try:
+            if self._config.verbose:
+                self.logger.info(f"Enabling NAT internet access for VM {vm_ip}")
+
+            # Add basic NAT rules
+            self.add_nat_rules(tap_name, iface_name)
+
+            # Ensure masquerade rule exists for outgoing traffic
+            self.ensure_masquerade(iface_name)
+
+            # Add forwarding rules for the VM's subnet
+            rules = {
+                "nftables": [
+                    {
+                        "add": {
+                            "rule": {
+                                "family": "ip",
+                                "table": "filter",
+                                "chain": "FORWARD",
+                                "expr": [
+                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": iface_name}},
+                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": tap_name}},
+                                    {"counter": {"packets": 0, "bytes": 0}},
+                                    {"accept": None}
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        "add": {
+                            "rule": {
+                                "family": "ip",
+                                "table": "filter",
+                                "chain": "FORWARD",
+                                "expr": [
+                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": tap_name}},
+                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": iface_name}},
+                                    {"counter": {"packets": 0, "bytes": 0}},
+                                    {"accept": None}
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+
+            for rule in rules["nftables"]:
+                rc, output, error = self._nft.json_cmd({"nftables": [rule]})
+                if rc != 0 and "File exists" not in str(error):
+                    raise NetworkError(f"Failed to add NAT rule: {error}")
+
+            if self._config.verbose:
+                self.logger.info("NAT internet access enabled successfully")
+
+        except Exception as e:
+            raise NetworkError(f"Failed to enable NAT internet access: {str(e)}")
