@@ -32,7 +32,7 @@ The `MicroVMConfig` class is a dataclass that defines default configuration valu
 | `expose_ports` | bool | False | Whether to expose ports by default |
 | `host_port` | int | None | Default host port for port forwarding |
 | `dest_port` | int | None | Default destination port for port forwarding |
-| `enable_nat` | bool | False | Whether to enable NAT by default |
+| `nat_enabled` | bool | False | Whether to enable NAT by default |
 | `user_data` | str | None | Cloud-init user data |
 
 ## Using Custom Configuration
