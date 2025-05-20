@@ -714,7 +714,7 @@ class MicroVM:
             )
 
             # Enable NAT internet access if configured
-            if self._config.enable_nat:
+            if self._config.nat_enabled:
                 self._network.enable_nat_internet_access(
                     tap_name=self._host_dev_name,
                     iface_name=self._iface_name,
