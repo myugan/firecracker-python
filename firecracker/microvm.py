@@ -203,7 +203,7 @@ class MicroVM:
                 self._logger.info("VMM started successfully")
 
             if self._expose_ports:
-                self.port_forward()
+                self.port_forward(host_port=self._host_port, dest_port=self._dest_port)
 
                 ports = {}
                 port_pairs = zip(self._host_port, self._dest_port)
