@@ -489,7 +489,7 @@ class MicroVM:
                     file.truncate()
                 return f"Port forwarding rule removed: {host_ip}:{host_port} -> {dest_ip}:{dest_port}"
 
-            self._network.add_port_forward(id, host_ip, host_port, dest_ip, dest_port)
+            self._network.add_port_forward(host_ip, host_port, dest_ip, dest_port)
             config_path = f"{self._config.data_path}/{id}/config.json"
             with open(config_path, "r+") as file:
                 config = json.load(file)
