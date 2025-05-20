@@ -203,7 +203,7 @@ class MicroVM:
                 self._logger.info("VMM started successfully")
 
             if self._expose_ports:
-                self.port_forward()
+                self.port_forward(host_port=self._host_port, dest_port=self._dest_port)
 
                 ports = {}
                 port_pairs = zip(self._host_port, self._dest_port)
@@ -489,7 +489,7 @@ class MicroVM:
                     file.truncate()
                 return f"Port forwarding rule removed: {host_ip}:{host_port} -> {dest_ip}:{dest_port}"
 
-            self._network.add_port_forward(id, host_ip, host_port, dest_ip, dest_port)
+            self._network.add_port_forward(host_ip, host_port, dest_ip, dest_port)
             config_path = f"{self._config.data_path}/{id}/config.json"
             with open(config_path, "r+") as file:
                 config = json.load(file)
