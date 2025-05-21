@@ -15,7 +15,7 @@ from firecracker.logger import Logger
 from firecracker.network import NetworkManager
 from firecracker.process import ProcessManager
 from firecracker.vmm import VMMManager
-from firecracker.utils import run, get_public_ip, validate_ip_address, generate_id, generate_name
+from firecracker.utils import run, validate_ip_address, generate_id, generate_name
 from firecracker.exceptions import APIError, VMMError, ConfigurationError, ProcessError
 import paramiko.ssh_exception
 
@@ -26,7 +26,27 @@ class MicroVM:
     Args:
         id (str, optional): ID for the MicroVM
     """
-    def __init__(self, name: str = None, kernel_file: str = None, base_rootfs: str = None, rootfs_url: str = None, vcpu: int = None, mem_size_mib: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None, mmds_enabled: bool = None, mmds_ip: str = None, labels: dict = None, working_dir: str = '/root', expose_ports: bool = None, host_port: int = None, dest_port: int = None, verbose: bool = False) -> None:
+
+    def __init__(
+        self,
+        name: str = None,
+        kernel_file: str = None,
+        base_rootfs: str = None,
+        rootfs_url: str = None,
+        vcpu: int = None,
+        mem_size_mib: int = None,
+        ip_addr: str = None,
+        bridge: bool = None,
+        bridge_name: str = None,
+        mmds_enabled: bool = None,
+        mmds_ip: str = None,
+        labels: dict = None,
+        working_dir: str = "/root",
+        expose_ports: bool = None,
+        host_port: int = None,
+        dest_port: int = None,
+        verbose: bool = False,
+    ) -> None:
         """Initialize a new MicroVM instance with configuration.
 
         Args:
@@ -51,8 +71,12 @@ class MicroVM:
         # Configuration
         self._config = MicroVMConfig()
         self._vcpu = self._config.vcpu_count if vcpu is None else vcpu
-        self._mem_size_mib = self._config.mem_size_mib if mem_size_mib is None else mem_size_mib
-        self._mmds_enabled = self._config.mmds_enabled if mmds_enabled is None else mmds_enabled
+        self._mem_size_mib = (
+            self._config.mem_size_mib if mem_size_mib is None else mem_size_mib
+        )
+        self._mmds_enabled = (
+            self._config.mmds_enabled if mmds_enabled is None else mmds_enabled
+        )
         self._mmds_ip = self._config.mmds_ip if mmds_ip is None else mmds_ip
         self._user_data = {"meta-data": {"instance-id": self._microvm_id}}
         self._labels = labels if labels is not None else {}
@@ -63,7 +87,9 @@ class MicroVM:
         self._process = ProcessManager(verbose=verbose)
         self._vmm = VMMManager(verbose=verbose)
 
-        self._socket_file = f"{self._config.data_path}/{self._microvm_id}/firecracker.socket"
+        self._socket_file = (
+            f"{self._config.data_path}/{self._microvm_id}/firecracker.socket"
+        )
         self._api = self._vmm.get_api(self._microvm_id)
 
         self._kernel_file = kernel_file if kernel_file else self._config.kernel_file
@@ -71,7 +97,7 @@ class MicroVM:
             self._base_rootfs = self._download_rootfs(rootfs_url)
         else:
             self._base_rootfs = base_rootfs if base_rootfs else self._config.base_rootfs
-        base_rootfs_name = os.path.basename(self._base_rootfs.replace('./', ''))
+        base_rootfs_name = os.path.basename(self._base_rootfs.replace("./", ""))
         self._vmm_dir = f"{self._config.data_path}/{self._microvm_id}"
         self._log_dir = f"{self._vmm_dir}/logs"
         self._rootfs_dir = f"{self._vmm_dir}/rootfs"
@@ -82,11 +108,15 @@ class MicroVM:
         self._ip_addr = ip_addr if ip_addr is not None else self._config.ip_addr
         self._gateway_ip = self._network.get_gateway_ip(self._ip_addr)
         self._bridge = self._config.bridge if bridge is None else bridge
-        self._bridge_name = self._config.bridge_name if bridge_name is None else bridge_name
+        self._bridge_name = (
+            self._config.bridge_name if bridge_name is None else bridge_name
+        )
 
         self._ssh_client = SSHClient()
-        self._expose_ports = self._config.expose_ports if expose_ports is None else expose_ports
-        
+        self._expose_ports = (
+            self._config.expose_ports if expose_ports is None else expose_ports
+        )
+
         self._host_port = self._parse_ports(host_port)
         self._dest_port = self._parse_ports(dest_port)
 
@@ -95,7 +125,7 @@ class MicroVM:
         if not isinstance(self._mem_size_mib, int) or self._mem_size_mib < 128:
             raise ValueError("mem_size_mib must be valid")
 
-        if hasattr(self, '_ip_addr') and self._ip_addr:
+        if hasattr(self, "_ip_addr") and self._ip_addr:
             validate_ip_address(self._ip_addr)
 
     @staticmethod
@@ -114,7 +144,7 @@ class MicroVM:
         Args:
             state (str, optional): State of the VMM to find.
             labels (dict, optional): Labels to filter VMMs by.
-        
+
         Returns:
             str: ID of the found VMM or error message.
         """
@@ -168,19 +198,19 @@ class MicroVM:
         id = id if id else self._microvm_id
         if not id:
             return "No VMM ID specified for checking status"
-        
+
         with open(f"{self._config.data_path}/{id}/config.json", "r") as f:
             config = json.load(f)
-            if config['State']['Running']:
+            if config["State"]["Running"]:
                 return f"VMM {id} is running"
-            elif config['State']['Paused']:
+            elif config["State"]["Paused"]:
                 return f"VMM {id} is paused"
 
     def create(self) -> dict:
         """Create a new VMM and configure it."""
         vmm_list = self._vmm.list_vmm()
 
-        if self._microvm_name in [vmm['name'] for vmm in vmm_list]:
+        if self._microvm_name in [vmm["name"] for vmm in vmm_list]:
             return f"VMM with name {self._microvm_name} already exists"
 
         try:
@@ -209,16 +239,15 @@ class MicroVM:
                 port_pairs = zip(self._host_port, self._dest_port)
                 if self._config.verbose:
                     self._logger.info(f"Port pairs: {port_pairs}")
-                
+
                 for host_port, dest_port in port_pairs:
                     port_key = f"{dest_port}/tcp"
                     if port_key not in ports:
                         ports[port_key] = []
-                        
-                    ports[port_key].append({
-                        "HostPort": host_port,
-                        "DestPort": dest_port
-                    })
+
+                    ports[port_key].append(
+                        {"HostPort": host_port, "DestPort": dest_port}
+                    )
             else:
                 ports = {}
 
@@ -235,12 +264,14 @@ class MicroVM:
                     Ports=ports,
                     IPAddress=self._ip_addr,
                     Labels=self._labels,
-                    WorkingDir=self._working_dir
+                    WorkingDir=self._working_dir,
                 )
                 return f"VMM {self._microvm_id} is created successfully"
             else:
                 if self._config.verbose:
-                    self._logger.info(f"VMM {self._microvm_id} is failed to create, deleting the VMM")
+                    self._logger.info(
+                        f"VMM {self._microvm_id} is failed to create, deleting the VMM"
+                    )
                 self._vmm.delete_vmm(self._microvm_id)
                 return f"VMM {self._microvm_id} failed to create"
 
@@ -270,7 +301,7 @@ class MicroVM:
             config_path = f"{self._config.data_path}/{id}/config.json"
             with open(config_path, "r+") as file:
                 config = json.load(file)
-                config['State']['Paused'] = "true"
+                config["State"]["Paused"] = "true"
                 file.seek(0)
                 json.dump(config, file)
                 file.truncate()
@@ -300,7 +331,7 @@ class MicroVM:
             config_path = f"{self._config.data_path}/{id}/config.json"
             with open(config_path, "r+") as file:
                 config = json.load(file)
-                config['State']['Paused'] = "false"
+                config["State"]["Paused"] = "false"
                 file.seek(0)
                 json.dump(config, file)
                 file.truncate()
@@ -335,10 +366,10 @@ class MicroVM:
 
             if all:
                 for vmm in vmm_list:
-                    self._vmm.delete_vmm(vmm['id'])
+                    self._vmm.delete_vmm(vmm["id"])
                 return "All VMMs deleted successfully"
 
-            if id not in [vmm['id'] for vmm in vmm_list]:
+            if id not in [vmm["id"] for vmm in vmm_list]:
                 return f"VMM with ID {id} not found"
 
             if self._config.verbose:
@@ -376,13 +407,13 @@ class MicroVM:
                 return "No VMMs available to connect"
 
             id = id if id else self._microvm_id
-            available_vmm_ids = [vmm['id'] for vmm in self._vmm.list_vmm()]
+            available_vmm_ids = [vmm["id"] for vmm in self._vmm.list_vmm()]
 
             if id not in available_vmm_ids:
                 return f"VMM with ID {id} does not exist"
 
             with open(f"{self._config.data_path}/{id}/config.json", "r") as f:
-                ip_addr = json.load(f)['Network'][f"tap_{id}"]['IPAddress']
+                ip_addr = json.load(f)["Network"][f"tap_{id}"]["IPAddress"]
 
             max_retries = 3
             retries = 0
@@ -392,7 +423,7 @@ class MicroVM:
                     self._ssh_client.connect(
                         hostname=ip_addr,
                         username=username if username else self._config.ssh_user,
-                        key_filename=key_path
+                        key_filename=key_path,
                     )
                     break
                 except paramiko.ssh_exception.NoValidConnectionsError as e:
@@ -404,7 +435,9 @@ class MicroVM:
                     time.sleep(2)
 
             if self._config.verbose:
-                self._logger.info(f"Attempting SSH connection to {ip_addr} with user {self._config.ssh_user}")
+                self._logger.info(
+                    f"Attempting SSH connection to {ip_addr} with user {self._config.ssh_user}"
+                )
 
             channel = self._ssh_client.invoke_shell()
 
@@ -426,7 +459,10 @@ class MicroVM:
                         sys.stdout.buffer.write(data)
                         sys.stdout.flush()
 
-                    if old_settings and sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
+                    if (
+                        old_settings
+                        and sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]
+                    ):
                         char = sys.stdin.read(1)
                         if not char:
                             break
@@ -449,112 +485,168 @@ class MicroVM:
         except Exception as e:
             raise VMMError(str(e))
 
-    def port_forward(self, id=None, host_port: int = None, dest_port: int = None, remove: bool = False):
-        """Forward a port from the host to the microVM and maintain the connection until interrupted.
+    def port_forward(self, id=None, host_port=None, dest_port=None, remove=False):
+        """Forward a port from the host to the microVM.
 
         Args:
             host_port (int): Port on the host to forward
             dest_port (int): Port on the destination
-            id (str, optional): ID of the VMM to forward ports to. If not provided, uses the last created VMM.
-            remove (bool, optional): If True, remove the port forwarding rule instead of adding it.
+            id (str, optional): ID of the VMM to forward ports to
+            remove (bool, optional): Remove the port forwarding rule if True
 
         Raises:
             VMMError: If VMM IP address cannot be found or port forwarding fails
-            ValueError: If the provided ports are not valid port numbers
         """
         try:
             if not self._vmm.list_vmm():
                 return "No VMMs available to forward ports"
 
             id = id if id else self._microvm_id
-            available_vmm_ids = [vmm['id'] for vmm in self._vmm.list_vmm()]
+            available_vmm_ids = [vmm["id"] for vmm in self._vmm.list_vmm()]
             if id not in available_vmm_ids:
                 return f"VMM with ID {id} does not exist"
 
-            host_ip = get_public_ip()
-            # dest_ip = self._vmm.get_vmm_ip_addr(id)
+            # Use 0.0.0.0 for local forwarding instead of public IP
+            host_ip = "0.0.0.0"  # Allow connections from any interface
 
+            # Get the VM IP address from its config file
             with open(f"{self._config.data_path}/{id}/config.json", "r") as f:
-                dest_ip = json.load(f)['Network'][f"tap_{id}"]['IPAddress']
+                config = json.load(f)
+                tap_key = f"tap_{id}"
+
+                if "Network" not in config or tap_key not in config["Network"]:
+                    raise VMMError(f"Network configuration not found for VMM {id}")
+
+                dest_ip = config["Network"][tap_key]["IPAddress"]
+                if not dest_ip:
+                    raise VMMError(f"Could not determine IP address for VMM {id}")
+
+            if self._config.verbose:
+                self._logger.info(
+                    f"Setting up port forwarding: {host_ip}:{host_port} -> "
+                    f"{dest_ip}:{dest_port}"
+                )
 
             if remove:
-                self._network.delete_port_forward(host_ip, host_port, dest_ip, dest_port)
+                try:
+                    self._network.delete_port_forward(
+                        host_ip, host_port, dest_ip, dest_port
+                    )
+
+                    # Update the config file to reflect the change
+                    config_path = f"{self._config.data_path}/{id}/config.json"
+                    with open(config_path, "r+") as file:
+                        config = json.load(file)
+                        if f"{dest_port}/tcp" in config["Ports"]:
+                            del config["Ports"][f"{dest_port}/tcp"]
+                        file.seek(0)
+                        json.dump(config, file)
+                        file.truncate()
+
+                    return (
+                        f"Port forwarding rule removed: {host_ip}:{host_port} -> "
+                        f"{dest_ip}:{dest_port}"
+                    )
+                except Exception as e:
+                    return (
+                        f"Failed to remove port forwarding: {host_ip}:{host_port} -> "
+                        f"{dest_ip}:{dest_port}: {str(e)}"
+                    )
+
+            try:
+                # Set up the port forwarding with nftables
+                self._network.add_port_forward(host_ip, host_port, dest_ip, dest_port)
+
+                # Update the config file to record the forwarding
                 config_path = f"{self._config.data_path}/{id}/config.json"
                 with open(config_path, "r+") as file:
                     config = json.load(file)
-                    if f"{dest_port}/tcp" in config['Ports']:
-                        del config['Ports'][f"{dest_port}/tcp"]
+                    if f"{dest_port}/tcp" not in config["Ports"]:
+                        config["Ports"][f"{dest_port}/tcp"] = []
+
+                    port_entry = {"HostPort": host_port, "DestPort": dest_port}
+                    config["Ports"][f"{dest_port}/tcp"].append(port_entry)
                     file.seek(0)
                     json.dump(config, file)
                     file.truncate()
-                return f"Port forwarding rule removed: {host_ip}:{host_port} -> {dest_ip}:{dest_port}"
 
-            self._network.add_port_forward(host_ip, host_port, dest_ip, dest_port)
-            config_path = f"{self._config.data_path}/{id}/config.json"
-            with open(config_path, "r+") as file:
-                config = json.load(file)
-                if f"{dest_port}/tcp" not in config['Ports']:
-                    config['Ports'][f"{dest_port}/tcp"] = []
-                config['Ports'][f"{dest_port}/tcp"].append({"HostPort": host_port, "DestPort": dest_port})
-                file.seek(0)
-                json.dump(config, file)
-                file.truncate()
-            
-            return f"Port forwarding active: {host_ip}:{host_port} -> {dest_ip}:{dest_port}"
+                # Check if the rule was actually applied
+                rules = self._network.get_port_forward_handles(
+                    host_ip, host_port, dest_ip, dest_port
+                )
+
+                if not rules or "prerouting" not in rules:
+                    raise VMMError(
+                        f"Port forwarding setup failed - rule not found in nftables"
+                    )
+
+                return (
+                    f"Port forwarding active: {host_ip}:{host_port} -> "
+                    f"{dest_ip}:{dest_port}"
+                )
+            except Exception as e:
+                raise VMMError(
+                    f"Failed to set up port forwarding: {host_ip}:{host_port} -> "
+                    f"{dest_ip}:{dest_port}: {str(e)}"
+                )
 
         except Exception as e:
-            raise VMMError(str(e))
+            raise VMMError(f"Port forwarding failed: {str(e)}")
 
     def execute_in_vm(self, id=None, commands=None):
         """Execute commands in the VM console through the screen session.
-        
+
         This method allows sending commands directly to the VM's console, which is useful
         for configuring networking when SSH is not available.
-        
+
         Args:
             id (str, optional): VM ID. If not provided, uses the current VM ID.
             commands (list): List of commands to execute in the VM console
-            
+
         Returns:
             bool: Success status
-            
+
         Raises:
             VMMError: If the command execution fails
         """
         if not commands:
             return False
-        
+
         id = id if id else self._microvm_id
         session_name = f"fc_{id}"
-        
+
         if self._config.verbose:
             self._logger.info(f"Executing commands in VM {id} console")
-        
+
         try:
             # Prepare the commands with newlines
             cmd_string = "\n".join(commands) + "\n"
-            
+
             # Write commands to a temp file
             import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp:
+
+            with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp:
                 temp_path = temp.name
                 temp.write(cmd_string)
-            
+
             # Use screen's stuff command to send commands to the VM
             stuff_cmd = f"screen -S {session_name} -X stuff $'$(cat {temp_path})'"
             result = run(stuff_cmd)
-            
+
             # Clean up temp file
             import os
+
             os.unlink(temp_path)
-            
+
             if result.returncode == 0:
                 if self._config.verbose:
                     self._logger.info(f"Successfully executed commands in VM {id}")
                 return True
             else:
-                raise VMMError(f"Failed to execute commands in VM {id}: {result.stderr}")
-        
+                raise VMMError(
+                    f"Failed to execute commands in VM {id}: {result.stderr}"
+                )
+
         except Exception as e:
             raise VMMError(f"Failed to execute commands in VM {id}: {str(e)}")
 
@@ -576,8 +668,10 @@ class MicroVM:
             return [port_value]
 
         if isinstance(port_value, str):
-            if ',' in port_value:
-                return [int(p.strip()) for p in port_value.split(',') if p.strip().isdigit()]
+            if "," in port_value:
+                return [
+                    int(p.strip()) for p in port_value.split(",") if p.strip().isdigit()
+                ]
             elif port_value.isdigit():
                 return [int(port_value)]
 
@@ -643,8 +737,7 @@ class MicroVM:
                 raise ConfigurationError(f"Kernel file not found: {self._kernel_file}")
 
             boot_response = self._api.boot.put(
-                kernel_image_path=self._kernel_file,
-                boot_args=self._boot_args
+                kernel_image_path=self._kernel_file, boot_args=self._boot_args
             )
 
             if self._config.verbose:
@@ -664,7 +757,7 @@ class MicroVM:
                 drive_id="rootfs",
                 path_on_host=self._rootfs_file,
                 is_root_device=True,
-                is_read_only=False
+                is_read_only=False,
             )
 
             if self._config.verbose:
@@ -681,12 +774,13 @@ class MicroVM:
                 self._logger.info("Configuring VMM resources...")
 
             self._api.machine_config.put(
-                vcpu_count=self._vcpu,
-                mem_size_mib=self._mem_size_mib
+                vcpu_count=self._vcpu, mem_size_mib=self._mem_size_mib
             )
 
             if self._config.verbose:
-                self._logger.info(f"VMM is configured with {self._vcpu} vCPUs and {self._mem_size_mib} MiB of memory")
+                self._logger.info(
+                    f"VMM is configured with {self._vcpu} vCPUs and {self._mem_size_mib} MiB of memory"
+                )
 
         except Exception as e:
             raise ConfigurationError(f"Failed to configure VMM resources: {str(e)}")
@@ -705,12 +799,11 @@ class MicroVM:
                 name=self._host_dev_name,
                 iface_name=self._iface_name,
                 gateway_ip=self._gateway_ip,
-                bridge=self._bridge
+                bridge=self._bridge,
             )
 
             self._api.network.put(
-                iface_id=self._iface_name,
-                host_dev_name=self._host_dev_name
+                iface_id=self._iface_name, host_dev_name=self._host_dev_name
             )
 
             # Enable NAT internet access if configured
@@ -718,7 +811,7 @@ class MicroVM:
                 self._network.enable_nat_internet_access(
                     tap_name=self._host_dev_name,
                     iface_name=self._iface_name,
-                    vm_ip=self._ip_addr
+                    vm_ip=self._ip_addr,
                 )
 
             if self._config.verbose:
@@ -734,7 +827,14 @@ class MicroVM:
         """
         try:
             if self._config.verbose:
-                self._logger.info("MMDS is " + ("disabled" if not self._mmds_enabled else "enabled, configuring MMDS network..."))
+                self._logger.info(
+                    "MMDS is "
+                    + (
+                        "disabled"
+                        if not self._mmds_enabled
+                        else "enabled, configuring MMDS network..."
+                    )
+                )
 
             if not self._mmds_enabled:
                 return
@@ -742,11 +842,13 @@ class MicroVM:
             mmds_response = self._api.mmds_config.put(
                 version="V2",
                 ipv4_address=self._mmds_ip,
-                network_interfaces=[self._iface_name]
+                network_interfaces=[self._iface_name],
             )
 
             if self._config.verbose:
-                self._logger.debug(f"MMDS network configuration response: {mmds_response}")
+                self._logger.debug(
+                    f"MMDS network configuration response: {mmds_response}"
+                )
                 self._logger.info("Setting MMDS data...")
 
             # Prepare user data
@@ -754,7 +856,7 @@ class MicroVM:
                 "latest": {
                     "meta-data": {
                         "instance-id": self._microvm_id,
-                        "local-hostname": self._hostname
+                        "local-hostname": self._hostname,
                     }
                 }
             }
@@ -776,20 +878,29 @@ class MicroVM:
         try:
             self._vmm._ensure_socket_file(self._microvm_id)
 
-            for path in [self._vmm_dir, f"{self._vmm_dir}/rootfs", f"{self._vmm_dir}/logs"]:
+            for path in [
+                self._vmm_dir,
+                f"{self._vmm_dir}/rootfs",
+                f"{self._vmm_dir}/logs",
+            ]:
                 self._vmm.create_vmm_dir(path)
 
             run(f"cp {self._base_rootfs} {self._rootfs_file}")
             if self._config.verbose:
-                self._logger.info(f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}")
+                self._logger.info(
+                    f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}"
+                )
 
-            for log_file in [f"{self._microvm_id}.log", f"{self._microvm_id}_screen.log"]:
+            for log_file in [
+                f"{self._microvm_id}.log",
+                f"{self._microvm_id}_screen.log",
+            ]:
                 self._vmm.create_log_file(self._microvm_id, log_file)
 
             binary_params = [
                 f"--api-sock {self._socket_file}",
                 f"--id {self._microvm_id}",
-                f"--log-path {self._log_dir}/{self._microvm_id}.log"
+                f"--log-path {self._log_dir}/{self._microvm_id}.log",
             ]
 
             session_name = f"fc_{self._microvm_id}"
@@ -797,7 +908,7 @@ class MicroVM:
                 screen_log=f"{self._log_dir}/{self._microvm_id}_screen.log",
                 session_name=session_name,
                 binary_path=self._config.binary_path,
-                binary_params=binary_params
+                binary_params=binary_params,
             )
 
             max_retries = 3
@@ -811,7 +922,9 @@ class MicroVM:
                 if retry < max_retries - 1:
                     time.sleep(0.5)
 
-            raise APIError(f"Failed to connect to the API socket after {max_retries} attempts")
+            raise APIError(
+                f"Failed to connect to the API socket after {max_retries} attempts"
+            )
 
         except Exception as exc:
             self._vmm.cleanup_resources(self._microvm_id)
@@ -833,7 +946,7 @@ class MicroVM:
             filename = url.split("/")[-1]
             path = os.path.join(self._config.data_path, filename)
 
-            with open(path, 'wb') as f:
+            with open(path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
 
