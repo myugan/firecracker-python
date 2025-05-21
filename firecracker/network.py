@@ -37,6 +37,48 @@ class NetworkManager:
         self._nft = Nftables()
         self._nft.set_json_output(True)
 
+    def get_host_ip(self) -> str:
+        """Get the host machine's IP address.
+
+        Returns:
+            str: The host's IP address
+            
+        Raises:
+            NetworkError: If unable to determine the host IP address
+        """
+        try:
+            # First try to get the IP address of the default interface
+            interface = self.get_interface_name()
+            
+            process = run(f"ip addr show {interface} | grep 'inet ' | awk '{{print $2}}' | cut -d/ -f1")
+            if process.returncode == 0 and process.stdout.strip():
+                ip = process.stdout.strip()
+                if self._config.verbose:
+                    self.logger.info(f"Host IP address: {ip}")
+                return ip
+                
+            # Fallback method - get local IP by creating a dummy socket
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # Doesn't need to be reachable, just to determine interface
+                s.connect(('10.255.255.255', 1))
+                ip = s.getsockname()[0]
+                if self._config.verbose:
+                    self.logger.info(f"Host IP address (socket method): {ip}")
+                return ip
+            except Exception:
+                if self._config.verbose:
+                    self.logger.warn("Failed to get IP using socket method")
+            finally:
+                s.close()
+                
+            # Last resort method for localhost
+            return "127.0.0.1"
+            
+        except Exception as e:
+            raise NetworkError(f"Failed to determine host IP address: {str(e)}")
+
     def get_interface_name(self) -> str:
         """Get the name of the network interface.
 
