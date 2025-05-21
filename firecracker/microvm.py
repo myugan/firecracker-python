@@ -7,6 +7,7 @@ import select
 import termios
 import tty
 import requests
+import ipaddress
 from paramiko import SSHClient, AutoAddPolicy
 from typing import Tuple, List, Dict
 from firecracker.config import MicroVMConfig
@@ -222,8 +223,41 @@ class MicroVM:
             if not self._basic_config():
                 return "Failed to configure VMM"
 
+            # Handle IP address overlap by finding an available IP address
             if self._vmm.check_network_overlap(self._ip_addr):
-                return f"IP address {self._ip_addr} is already in use"
+                if self._config.verbose:
+                    msg = f"IP address {self._ip_addr} is already in use, "
+                    msg += "finding available IP..."
+                    self._logger.info(msg)
+
+                # Get existing IP addresses
+                existing_ips = set()
+                for vmm in vmm_list:
+                    if "Network" in vmm and f"tap_{vmm['id']}" in vmm["Network"]:
+                        net_config = vmm["Network"][f"tap_{vmm['id']}"]
+                        existing_ips.add(net_config["IPAddress"])
+
+                # Find an available IP in the same subnet
+                ip_net = ipaddress.IPv4Network(f"{self._ip_addr}/24", strict=False)
+                for ip in ip_net.hosts():
+                    ip_str = str(ip)
+                    # Skip the gateway IP and the original IP
+                    not_gateway = ip_str != self._gateway_ip
+                    not_original = ip_str != self._ip_addr
+                    not_in_use = ip_str not in existing_ips
+                    if not_gateway and not_original and not_in_use:
+                        self._ip_addr = ip_str
+                        self._gateway_ip = self._network.get_gateway_ip(self._ip_addr)
+
+                        if self._config.verbose:
+                            self._logger.info(f"Using new IP address: {self._ip_addr}")
+
+                        # Reconfigure network with the new IP
+                        self._configure_vmm_network()
+                        break
+                else:
+                    # If we get here, we couldn't find an available IP
+                    return "Could not find an available IP address in the subnet"
 
             if self._config.verbose:
                 self._logger.info(f"Creating VMM {self._microvm_name}")
@@ -244,23 +278,31 @@ class MicroVM:
 
                 if not self._host_port or not self._dest_port:
                     if self._config.verbose:
-                        self._logger.warn("Port forwarding requested but no ports specified")
+                        self._logger.warn(
+                            "Port forwarding requested but no ports specified"
+                        )
                 else:
                     try:
                         if self._config.verbose:
-                            self._logger.info("Attempting to configure port forwarding...")
-                        self.port_forward(host_port=self._host_port, dest_port=self._dest_port)
+                            self._logger.info(
+                                "Attempting to configure port forwarding..."
+                            )
+                        self.port_forward(
+                            host_port=self._host_port, dest_port=self._dest_port
+                        )
                         if self._config.verbose:
                             self._logger.info("Port forwarding configured successfully")
                     except Exception as e:
                         if self._config.verbose:
-                            self._logger.error(f"Failed to configure port forwarding: {str(e)}")
+                            self._logger.error(
+                                f"Failed to configure port forwarding: {str(e)}"
+                            )
 
                 ports = {}
                 port_pairs = zip(self._host_port, self._dest_port)
                 if self._config.verbose:
                     self._logger.info(f"Port pairs: {list(port_pairs)}")
-                
+
                 for host_port, dest_port in zip(self._host_port, self._dest_port):
                     port_key = f"{dest_port}/tcp"
                     if port_key not in ports:
@@ -530,7 +572,7 @@ class MicroVM:
                 return f"VMM with ID {id} does not exist"
 
             # Get the host IP address
-            host_ip = get_public_ip()
+            host_ip = self._network.get_host_ip()
             if not host_ip:
                 raise VMMError("Could not determine host IP address")
 
@@ -541,18 +583,22 @@ class MicroVM:
 
             with open(config_path, "r") as f:
                 config = json.load(f)
-                if 'Network' not in config or f"tap_{id}" not in config['Network']:
+                if "Network" not in config or f"tap_{id}" not in config["Network"]:
                     raise VMMError(f"Network configuration not found for VMM {id}")
-                dest_ip = config['Network'][f"tap_{id}"]['IPAddress']
+                dest_ip = config["Network"][f"tap_{id}"]["IPAddress"]
 
             if not dest_ip:
-                raise VMMError(f"Could not determine destination IP address for VMM {id}")
+                raise VMMError(
+                    f"Could not determine destination IP address for VMM {id}"
+                )
 
             # Validate ports
             if not host_port or not dest_port:
                 raise ValueError("Both host_port and dest_port must be provided")
 
-            if not isinstance(host_port, (int, list)) or not isinstance(dest_port, (int, list)):
+            if not isinstance(host_port, (int, list)) or not isinstance(
+                dest_port, (int, list)
+            ):
                 raise ValueError("Ports must be integers or lists of integers")
 
             # Convert single ports to lists for consistent handling
@@ -560,18 +606,24 @@ class MicroVM:
             dest_ports = [dest_port] if isinstance(dest_port, int) else dest_port
 
             if len(host_ports) != len(dest_ports):
-                raise ValueError("Number of host ports must match number of destination ports")
+                raise ValueError(
+                    "Number of host ports must match number of destination ports"
+                )
 
             # Process each port pair
             for h_port, d_port in zip(host_ports, dest_ports):
                 if remove:
                     self._network.delete_port_forward(host_ip, h_port, dest_ip, d_port)
                     if self._config.verbose:
-                        self._logger.info(f"Removed port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}")
+                        self._logger.info(
+                            f"Removed port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}"
+                        )
                 else:
                     self._network.add_port_forward(host_ip, h_port, dest_ip, d_port)
                     if self._config.verbose:
-                        self._logger.info(f"Added port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}")
+                        self._logger.info(
+                            f"Added port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}"
+                        )
 
             return f"Port forwarding {'removed' if remove else 'added'} successfully"
 
@@ -841,7 +893,7 @@ class MicroVM:
                 "latest": {
                     "meta-data": {
                         "instance-id": self._microvm_id,
-                        "local-hostname": self._microvm_name
+                        "local-hostname": self._microvm_name,
                     }
                 }
             }
