@@ -571,10 +571,10 @@ class MicroVM:
             if id not in available_vmm_ids:
                 return f"VMM with ID {id} does not exist"
 
-            # Use 0.0.0.0 to listen on all interfaces instead of a specific host IP
-            host_ip = "0.0.0.0"
+            # Get the host's public IP address instead of using 0.0.0.0
+            host_ip = self._network.get_host_ip()
             if self._config.verbose:
-                self._logger.info("Using 0.0.0.0 to listen on all interfaces")
+                self._logger.info(f"Using host IP: {host_ip} for port forwarding")
 
             # Get the VM's IP address from the config file
             config_path = f"{self._config.data_path}/{id}/config.json"

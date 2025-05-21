@@ -772,7 +772,7 @@ class NetworkManager:
                     if not os.path.exists(nft_path):
                         raise NetworkError("Could not find nft executable in PATH or standard locations")
             
-            # Create commands with proper syntax (using single quotes for complex commands)
+            # Create commands using NAT table
             commands = [
                 f"{nft_path} add table nat",
                 f"{nft_path} 'add chain nat postrouting {{ type nat hook postrouting priority 100 ; }}'",
