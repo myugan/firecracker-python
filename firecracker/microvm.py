@@ -43,6 +43,10 @@ class MicroVM:
             mmds_ip (str, optional): IP address for MMDS
             labels (dict, optional): Labels for the MicroVM
             working_dir (str, optional): Working directory for the MicroVM
+            expose_ports (bool, optional): Whether to expose ports
+            host_port (int, optional): Host port for port forwarding
+            dest_port (int, optional): Destination port for port forwarding
+            verbose (bool, optional): Whether to enable verbose logging
         """
         # Generate IDs and Names
         self._microvm_id = generate_id()
@@ -203,14 +207,31 @@ class MicroVM:
                 self._logger.info("VMM started successfully")
 
             if self._expose_ports:
-                self.port_forward(host_port=self._host_port, dest_port=self._dest_port)
+                if self._config.verbose:
+                    self._logger.info("Port forwarding is enabled")
+                    self._logger.info(f"Host ports: {self._host_port}")
+                    self._logger.info(f"Destination ports: {self._dest_port}")
+
+                if not self._host_port or not self._dest_port:
+                    if self._config.verbose:
+                        self._logger.warn("Port forwarding requested but no ports specified")
+                else:
+                    try:
+                        if self._config.verbose:
+                            self._logger.info("Attempting to configure port forwarding...")
+                        self.port_forward(host_port=self._host_port, dest_port=self._dest_port)
+                        if self._config.verbose:
+                            self._logger.info("Port forwarding configured successfully")
+                    except Exception as e:
+                        if self._config.verbose:
+                            self._logger.error(f"Failed to configure port forwarding: {str(e)}")
 
                 ports = {}
                 port_pairs = zip(self._host_port, self._dest_port)
                 if self._config.verbose:
-                    self._logger.info(f"Port pairs: {port_pairs}")
+                    self._logger.info(f"Port pairs: {list(port_pairs)}")
                 
-                for host_port, dest_port in port_pairs:
+                for host_port, dest_port in zip(self._host_port, self._dest_port):
                     port_key = f"{dest_port}/tcp"
                     if port_key not in ports:
                         ports[port_key] = []
@@ -220,6 +241,8 @@ class MicroVM:
                         "DestPort": dest_port
                     })
             else:
+                if self._config.verbose:
+                    self._logger.info("Port forwarding is disabled")
                 ports = {}
 
             pid, create_time = self._process.get_pids(self._microvm_id)
@@ -471,39 +494,54 @@ class MicroVM:
             if id not in available_vmm_ids:
                 return f"VMM with ID {id} does not exist"
 
+            # Get the host IP address
             host_ip = get_public_ip()
-            # dest_ip = self._vmm.get_vmm_ip_addr(id)
+            if not host_ip:
+                raise VMMError("Could not determine host IP address")
 
-            with open(f"{self._config.data_path}/{id}/config.json", "r") as f:
-                dest_ip = json.load(f)['Network'][f"tap_{id}"]['IPAddress']
-
-            if remove:
-                self._network.delete_port_forward(host_ip, host_port, dest_ip, dest_port)
-                config_path = f"{self._config.data_path}/{id}/config.json"
-                with open(config_path, "r+") as file:
-                    config = json.load(file)
-                    if f"{dest_port}/tcp" in config['Ports']:
-                        del config['Ports'][f"{dest_port}/tcp"]
-                    file.seek(0)
-                    json.dump(config, file)
-                    file.truncate()
-                return f"Port forwarding rule removed: {host_ip}:{host_port} -> {dest_ip}:{dest_port}"
-
-            self._network.add_port_forward(host_ip, host_port, dest_ip, dest_port)
+            # Get the VM's IP address from the config file
             config_path = f"{self._config.data_path}/{id}/config.json"
-            with open(config_path, "r+") as file:
-                config = json.load(file)
-                if f"{dest_port}/tcp" not in config['Ports']:
-                    config['Ports'][f"{dest_port}/tcp"] = []
-                config['Ports'][f"{dest_port}/tcp"].append({"HostPort": host_port, "DestPort": dest_port})
-                file.seek(0)
-                json.dump(config, file)
-                file.truncate()
-            
-            return f"Port forwarding active: {host_ip}:{host_port} -> {dest_ip}:{dest_port}"
+            if not os.path.exists(config_path):
+                raise VMMError(f"Config file not found for VMM {id}")
+
+            with open(config_path, "r") as f:
+                config = json.load(f)
+                if 'Network' not in config or f"tap_{id}" not in config['Network']:
+                    raise VMMError(f"Network configuration not found for VMM {id}")
+                dest_ip = config['Network'][f"tap_{id}"]['IPAddress']
+
+            if not dest_ip:
+                raise VMMError(f"Could not determine destination IP address for VMM {id}")
+
+            # Validate ports
+            if not host_port or not dest_port:
+                raise ValueError("Both host_port and dest_port must be provided")
+
+            if not isinstance(host_port, (int, list)) or not isinstance(dest_port, (int, list)):
+                raise ValueError("Ports must be integers or lists of integers")
+
+            # Convert single ports to lists for consistent handling
+            host_ports = [host_port] if isinstance(host_port, int) else host_port
+            dest_ports = [dest_port] if isinstance(dest_port, int) else dest_port
+
+            if len(host_ports) != len(dest_ports):
+                raise ValueError("Number of host ports must match number of destination ports")
+
+            # Process each port pair
+            for h_port, d_port in zip(host_ports, dest_ports):
+                if remove:
+                    self._network.delete_port_forward(host_ip, h_port, dest_ip, d_port)
+                    if self._config.verbose:
+                        self._logger.info(f"Removed port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}")
+                else:
+                    self._network.add_port_forward(host_ip, h_port, dest_ip, d_port)
+                    if self._config.verbose:
+                        self._logger.info(f"Added port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}")
+
+            return f"Port forwarding {'removed' if remove else 'added'} successfully"
 
         except Exception as e:
-            raise VMMError(str(e))
+            raise VMMError(f"Failed to configure port forwarding: {str(e)}")
 
     def execute_in_vm(self, id=None, commands=None):
         """Execute commands in the VM console through the screen session.
@@ -754,7 +792,7 @@ class MicroVM:
                 "latest": {
                     "meta-data": {
                         "instance-id": self._microvm_id,
-                        "local-hostname": self._hostname
+                        "local-hostname": self._microvm_name
                     }
                 }
             }
