@@ -6,23 +6,27 @@ from firecracker.utils import run
 from firecracker.config import MicroVMConfig
 from firecracker.exceptions import NetworkError, ConfigurationError
 from ipaddress import IPv4Address, IPv4Network, AddressValueError
-sys.path.append('/usr/lib/python3/dist-packages')
+
+sys.path.append("/usr/lib/python3/dist-packages")
 try:
     from nftables import Nftables
 except ImportError:
-    print("Nftables module is not available. Using mock implementation for non-Linux systems.")
+    print(
+        "Nftables module is not available. Using mock implementation for non-Linux systems."
+    )
+
     # Create a mock Nftables class for development/testing on non-Linux systems
     class Nftables:
         def __init__(self):
             pass
-            
+
         def set_json_output(self, value):
             pass
-            
+
         def json_cmd(self, cmd):
             print(f"MOCK: Would execute nftables command: {cmd}")
             return (0, {"nftables": []}, "")
-            
+
         def cmd(self, cmd):
             print(f"MOCK: Would execute nftables command: {cmd}")
             return (0, "", "")
@@ -30,6 +34,7 @@ except ImportError:
 
 class NetworkManager:
     """Manages network-related operations for Firecracker VMs."""
+
     def __init__(self, verbose: bool = False, level: str = "INFO"):
         self.logger = Logger(level=level, verbose=verbose)
         self._config = MicroVMConfig()
@@ -42,41 +47,68 @@ class NetworkManager:
 
         Returns:
             str: The host's IP address
-            
+
         Raises:
             NetworkError: If unable to determine the host IP address
         """
         try:
             # First try to get the IP address of the default interface
-            interface = self.get_interface_name()
-            
-            process = run(f"ip addr show {interface} | grep 'inet ' | awk '{{print $2}}' | cut -d/ -f1")
-            if process.returncode == 0 and process.stdout.strip():
-                ip = process.stdout.strip()
-                if self._config.verbose:
-                    self.logger.info(f"Host IP address: {ip}")
-                return ip
-                
-            # Fallback method - get local IP by creating a dummy socket
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                # Doesn't need to be reachable, just to determine interface
-                s.connect(('10.255.255.255', 1))
-                ip = s.getsockname()[0]
+                interface = self.get_interface_name()
+
+                cmd = f"ip -4 addr show {interface} | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){{3}}'"
+                process = run(cmd)
+                if process.returncode == 0 and process.stdout.strip():
+                    ip = process.stdout.strip()
+                    if self._config.verbose:
+                        self.logger.info(f"Host IP address: {ip}")
+                    return ip
+            except Exception as e:
                 if self._config.verbose:
-                    self.logger.info(f"Host IP address (socket method): {ip}")
-                return ip
+                    self.logger.warn(
+                        f"Failed to get IP using interface {interface}: {str(e)}"
+                    )
+
+            # Fallback method 1 - use hostname command
+            try:
+                process = run("hostname -I | awk '{print $1}'")
+                if process.returncode == 0 and process.stdout.strip():
+                    ip = process.stdout.strip()
+                    if self._config.verbose:
+                        self.logger.info(f"Host IP address (hostname method): {ip}")
+                    return ip
+            except Exception:
+                if self._config.verbose:
+                    self.logger.warn("Failed to get IP using hostname method")
+
+            # Fallback method 2 - get local IP by creating a dummy socket
+            try:
+                import socket
+
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    # Doesn't need to be reachable, just to determine interface
+                    s.connect(("8.8.8.8", 80))
+                    ip = s.getsockname()[0]
+                    if self._config.verbose:
+                        self.logger.info(f"Host IP address (socket method): {ip}")
+                    return ip
+                finally:
+                    s.close()
             except Exception:
                 if self._config.verbose:
                     self.logger.warn("Failed to get IP using socket method")
-            finally:
-                s.close()
-                
-            # Last resort method for localhost
+
+            # Last resort method - use localhost IP for testing purposes
+            if self._config.verbose:
+                self.logger.warn(
+                    "Using localhost (127.0.0.1) as host IP - port forwarding may not work correctly"
+                )
             return "127.0.0.1"
-            
+
         except Exception as e:
+            if self._config.verbose:
+                self.logger.error(f"Failed to determine host IP: {str(e)}")
             raise NetworkError(f"Failed to determine host IP address: {str(e)}")
 
     def get_interface_name(self) -> str:
@@ -115,9 +147,9 @@ class NetworkManager:
             if isinstance(ip_obj, IPv4Address):
                 gateway_ip = IPv4Address((int(ip_obj) & 0xFFFFFF00) | 1)
             elif isinstance(ip_obj, ipaddress.IPv6Address):
-                segments = ip_obj.exploded.split(':')
-                segments[-1] = '1'
-                gateway_ip = ipaddress.IPv6Address(':'.join(segments))
+                segments = ip_obj.exploded.split(":")
+                segments[-1] = "1"
+                gateway_ip = ipaddress.IPv6Address(":".join(segments))
             else:
                 raise NetworkError(f"Unsupported IP address type: {ip}")
 
@@ -141,18 +173,25 @@ class NetworkManager:
         """
         tap_rules = []
         for item in rules:
-            if 'rule' in item:
-                rule = item['rule']
-                if 'expr' in rule:
-                    for expr in rule['expr']:
-                        if 'match' in expr and 'right' in expr['match'] and isinstance(expr['match']['right'], str) and tap_name in expr['match']['right']:
+            if "rule" in item:
+                rule = item["rule"]
+                if "expr" in rule:
+                    for expr in rule["expr"]:
+                        if (
+                            "match" in expr
+                            and "right" in expr["match"]
+                            and isinstance(expr["match"]["right"], str)
+                            and tap_name in expr["match"]["right"]
+                        ):
                             if self._config.verbose:
                                 self.logger.info(f"Found matching rule for {tap_name}")
-                            tap_rules.append({
-                                'handle': rule['handle'],
-                                'chain': rule['chain'],
-                                'interface': expr['match']['right']
-                        })
+                            tap_rules.append(
+                                {
+                                    "handle": rule["handle"],
+                                    "chain": rule["chain"],
+                                    "interface": expr["match"]["right"],
+                                }
+                            )
 
         return tap_rules
 
@@ -177,12 +216,19 @@ class NetworkManager:
                     return False
 
                 link_info = ipr.get_links(links[0])[0]
-                for attr_name, attr_value in link_info.get('attrs', []):
-                    if attr_name == 'IFLA_LINKINFO':
-                        for info_attr_name, info_attr_value in attr_value.get('attrs', []):
-                            if info_attr_name == 'IFLA_INFO_KIND' and info_attr_value == 'bridge':
+                for attr_name, attr_value in link_info.get("attrs", []):
+                    if attr_name == "IFLA_LINKINFO":
+                        for info_attr_name, info_attr_value in attr_value.get(
+                            "attrs", []
+                        ):
+                            if (
+                                info_attr_name == "IFLA_INFO_KIND"
+                                and info_attr_value == "bridge"
+                            ):
                                 if self._config.verbose:
-                                    self.logger.info(f"Bridge device {bridge_name} exists")
+                                    self.logger.info(
+                                        f"Bridge device {bridge_name} exists"
+                                    )
                                 return True
 
                 return False
@@ -215,7 +261,9 @@ class NetworkManager:
                     return True
 
         except Exception as e:
-            raise NetworkError(f"Failed to check tap device {tap_device_name}: {str(e)}")
+            raise NetworkError(
+                f"Failed to check tap device {tap_device_name}: {str(e)}"
+            )
 
     def add_nat_rules(self, tap_name: str, iface_name: str):
         """Create network rules using nftables Python module.
@@ -230,14 +278,7 @@ class NetworkManager:
         rules = [
             {
                 "nftables": [
-                    {
-                        "add": {
-                            "table": {
-                                "family": "ip",
-                                "name": "nat"
-                            }
-                        }
-                    },
+                    {"add": {"table": {"family": "ip", "name": "nat"}}},
                     {
                         "add": {
                             "chain": {
@@ -247,18 +288,11 @@ class NetworkManager:
                                 "type": "nat",
                                 "hook": "postrouting",
                                 "priority": 100,
-                                "policy": "accept"
+                                "policy": "accept",
                             }
                         }
                     },
-                    {
-                        "add": {
-                            "table": {
-                                "family": "ip",
-                                "name": "filter"
-                            }
-                        }
-                    },
+                    {"add": {"table": {"family": "ip", "name": "filter"}}},
                     {
                         "add": {
                             "chain": {
@@ -268,7 +302,7 @@ class NetworkManager:
                                 "type": "filter",
                                 "hook": "forward",
                                 "priority": 0,
-                                "policy": "accept"
+                                "policy": "accept",
                             }
                         }
                     },
@@ -279,14 +313,26 @@ class NetworkManager:
                                 "table": "filter",
                                 "chain": "FORWARD",
                                 "expr": [
-                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": tap_name}},
-                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": iface_name}},
+                                    {
+                                        "match": {
+                                            "left": {"meta": {"key": "iifname"}},
+                                            "op": "==",
+                                            "right": tap_name,
+                                        }
+                                    },
+                                    {
+                                        "match": {
+                                            "left": {"meta": {"key": "oifname"}},
+                                            "op": "==",
+                                            "right": iface_name,
+                                        }
+                                    },
                                     {"counter": {"packets": 0, "bytes": 0}},
-                                    {"accept": None}
-                                ]
+                                    {"accept": None},
+                                ],
                             }
                         }
-                    }
+                    },
                 ]
             }
         ]
@@ -308,11 +354,13 @@ class NetworkManager:
         Raises:
             NetworkError: If retrieving NAT forwarding rules fails.
         """
-        list_cmd = {"nftables": [{"list": {"table": {"family": "ip", "name": "filter"}}}]}
+        list_cmd = {
+            "nftables": [{"list": {"table": {"family": "ip", "name": "filter"}}}]
+        }
         output = self._nft.json_cmd(list_cmd)
 
         try:
-            result = output[1]['nftables']
+            result = output[1]["nftables"]
             if self._config.verbose:
                 self.logger.debug(f"Found {len(result)} rules in the filter table")
             return result
@@ -334,32 +382,38 @@ class NetworkManager:
         output = self._nft.json_cmd(list_cmd)
 
         if not output[0]:
-            result = output[1]['nftables']
+            result = output[1]["nftables"]
 
             for item in result:
-                if 'rule' not in item:
+                if "rule" not in item:
                     continue
 
-                rule = item['rule']
-                if rule.get('chain') != 'POSTROUTING':
+                rule = item["rule"]
+                if rule.get("chain") != "POSTROUTING":
                     continue
 
                 has_interface_match = False
                 has_masquerade = False
 
-                for expr in rule.get('expr', []):
-                    if 'match' in expr and expr['match'].get('op') == '==' and \
-                    expr['match'].get('left', {}).get('meta', {}).get('key') == 'oifname' and \
-                    expr['match'].get('right') == iface_name:
+                for expr in rule.get("expr", []):
+                    if (
+                        "match" in expr
+                        and expr["match"].get("op") == "=="
+                        and expr["match"].get("left", {}).get("meta", {}).get("key")
+                        == "oifname"
+                        and expr["match"].get("right") == iface_name
+                    ):
                         has_interface_match = True
 
-                    if 'masquerade' in expr:
+                    if "masquerade" in expr:
                         has_masquerade = True
 
                 if has_interface_match and has_masquerade:
                     if self._config.verbose:
-                        self.logger.info(f"Found masquerade rule for {iface_name} with handle {rule.get('handle')}")
-                    return rule.get('handle')
+                        self.logger.info(
+                            f"Found masquerade rule for {iface_name} with handle {rule.get('handle')}"
+                        )
+                    return rule.get("handle")
 
         return None
 
@@ -377,7 +431,9 @@ class NetworkManager:
         handle = self.get_masquerade_handle(iface_name)
         if handle is not None:
             if self._config.verbose:
-                self.logger.info(f"Masquerade rule for {iface_name} already exists with handle {handle}")
+                self.logger.info(
+                    f"Masquerade rule for {iface_name} already exists with handle {handle}"
+                )
             return handle
 
         add_cmd = {
@@ -393,12 +449,12 @@ class NetworkManager:
                                     "match": {
                                         "op": "==",
                                         "left": {"meta": {"key": "oifname"}},
-                                        "right": iface_name
+                                        "right": iface_name,
                                     }
                                 },
                                 {"counter": {"packets": 0, "bytes": 0}},
-                                {"masquerade": None}
-                            ]
+                                {"masquerade": None},
+                            ],
                         }
                     }
                 }
@@ -415,7 +471,9 @@ class NetworkManager:
                 self.logger.warn(f"Failed to create masquerade rule: {result[1]}")
             return None
 
-    def get_port_forward_handles(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int):
+    def get_port_forward_handles(
+        self, host_ip: str, host_port: int, dest_ip: str, dest_port: int
+    ):
         """Get port forwarding rules from the nat table.
 
         Checks for both:
@@ -434,76 +492,111 @@ class NetworkManager:
         Raises:
             NetworkError: If retrieving nftables rules fails.
         """
-        list_cmd = {
-            "nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]
-        }
+        list_cmd = {"nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]}
 
         try:
             output = self._nft.json_cmd(list_cmd)
-            result = output[1]['nftables']
+            result = output[1]["nftables"]
             rules = {}
 
             for item in result:
-                if 'rule' not in item:
+                if "rule" not in item:
                     continue
 
-                rule = item['rule']
-                chain = rule.get('chain', '').upper()  # Normalize chain name to uppercase
+                rule = item["rule"]
+                chain = rule.get(
+                    "chain", ""
+                ).upper()  # Normalize chain name to uppercase
 
                 # Check for PREROUTING rules (for incoming traffic)
-                if rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'PREROUTING':
-                    expr = rule.get('expr', [])
+                if (
+                    rule.get("family") == "ip"
+                    and rule.get("table") == "nat"
+                    and chain == "PREROUTING"
+                ):
+                    expr = rule.get("expr", [])
 
                     has_daddr_match = False
                     has_dport_match = False
                     has_correct_dnat = False
 
                     for e in expr:
-                        if 'match' in e and e['match']['op'] == '==' and \
-                            'payload' in e['match']['left'] and e['match']['left']['payload']['field'] == 'daddr' and \
-                            e['match']['right'] == host_ip:
+                        if (
+                            "match" in e
+                            and e["match"]["op"] == "=="
+                            and "payload" in e["match"]["left"]
+                            and e["match"]["left"]["payload"]["field"] == "daddr"
+                            and e["match"]["right"] == host_ip
+                        ):
                             has_daddr_match = True
 
-                        if 'match' in e and e['match']['op'] == '==' and \
-                            'payload' in e['match']['left'] and e['match']['left']['payload']['field'] == 'dport' and \
-                            e['match']['right'] == host_port:
+                        if (
+                            "match" in e
+                            and e["match"]["op"] == "=="
+                            and "payload" in e["match"]["left"]
+                            and e["match"]["left"]["payload"]["field"] == "dport"
+                            and e["match"]["right"] == host_port
+                        ):
                             has_dport_match = True
 
-                        if 'dnat' in e and e['dnat']['addr'] == dest_ip and e['dnat']['port'] == dest_port:
+                        if (
+                            "dnat" in e
+                            and e["dnat"]["addr"] == dest_ip
+                            and e["dnat"]["port"] == dest_port
+                        ):
                             has_correct_dnat = True
                             if self._config.verbose:
-                                self.logger.info(f"Prerouting rule: {dest_ip}:{dest_port}")
+                                self.logger.info(
+                                    f"Prerouting rule: {dest_ip}:{dest_port}"
+                                )
 
                     if has_daddr_match and has_dport_match and has_correct_dnat:
                         if self._config.verbose:
-                            self.logger.debug(f"Found matching prerouting port forward rule {rule}")
-                            self.logger.info(f"Found prerouting rule with handle {rule['handle']}")
-                        rules['prerouting'] = rule['handle']
+                            self.logger.debug(
+                                f"Found matching prerouting port forward rule {rule}"
+                            )
+                            self.logger.info(
+                                f"Found prerouting rule with handle {rule['handle']}"
+                            )
+                        rules["prerouting"] = rule["handle"]
 
                 # Check for POSTROUTING rules (for outgoing traffic)
-                elif rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'POSTROUTING':
-                    expr = rule.get('expr', [])
+                elif (
+                    rule.get("family") == "ip"
+                    and rule.get("table") == "nat"
+                    and chain == "POSTROUTING"
+                ):
+                    expr = rule.get("expr", [])
                     has_saddr_match = False
                     has_masquerade = False
 
                     for e in expr:
                         # Check for source address match (VM's IP)
-                        if 'match' in e and e['match']['op'] == '==' and \
-                            'payload' in e['match']['left'] and e['match']['left']['payload']['field'] == 'saddr':
-                            if e['match']['right'] == dest_ip or \
-                               (isinstance(e['match']['right'], dict) and
-                                'prefix' in e['match']['right'] and
-                                e['match']['right']['prefix']['addr'] == dest_ip):
+                        if (
+                            "match" in e
+                            and e["match"]["op"] == "=="
+                            and "payload" in e["match"]["left"]
+                            and e["match"]["left"]["payload"]["field"] == "saddr"
+                        ):
+                            if e["match"]["right"] == dest_ip or (
+                                isinstance(e["match"]["right"], dict)
+                                and "prefix" in e["match"]["right"]
+                                and e["match"]["right"]["prefix"]["addr"] == dest_ip
+                            ):
                                 has_saddr_match = True
 
-                        if 'masquerade' in e:
+                        if "masquerade" in e:
                             has_masquerade = True
 
                     if has_saddr_match and has_masquerade:
                         if self._config.verbose:
-                            self.logger.debug(f"Found matching postrouting masquerade rule {rule}")
-                            self.logger.info(f"Found postrouting rule with handle {rule['handle']}")
-                        rules['postrouting'] = rule['handle']
+                            self.logger.debug(
+                                f"Found matching postrouting masquerade rule {rule}"
+                            )
+                            self.logger.info(
+                                f"Found postrouting rule with handle {rule['handle']}"
+                            )
+                        rules["postrouting"] = rule["handle"]
 
             if not rules and self._config.verbose:
                 self.logger.info("No port forwarding rules found")
@@ -513,7 +606,14 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to get nftables rules: {str(e)}")
 
-    def add_port_forward(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int, protocol: str = "tcp"):
+    def add_port_forward(
+        self,
+        host_ip: str,
+        host_port: int,
+        dest_ip: str,
+        dest_port: int,
+        protocol: str = "tcp",
+    ):
         """Port forward a port to a new IP and port.
 
         Args:
@@ -526,135 +626,78 @@ class NetworkManager:
         Raises:
             NetworkError: If adding nftables port forwarding rule fails.
         """
-        # First check if the rules already exist
-        existing_rules = self.get_port_forward_handles(host_ip, host_port, dest_ip, dest_port)
-        if existing_rules:
-            if self._config.verbose:
-                self.logger.info("Port forwarding rules already exist")
-            return
-
-        # Create the rules
-        rules = {
-            "nftables": [
-                {
-                    "add": {
-                        "table": {
-                            "family": "ip",
-                            "name": "nat"
-                        }
-                    }
-                },
-                {
-                    "add": {
-                        "chain": {
-                            "family": "ip",
-                            "table": "nat",
-                            "name": "PREROUTING",
-                            "type": "nat",
-                            "hook": "prerouting",
-                            "prio": -100,
-                            "policy": "accept"
-                        }
-                    }
-                },
-                {
-                    "add": {
-                        "chain": {
-                            "family": "ip",
-                            "table": "nat",
-                            "name": "POSTROUTING",
-                            "type": "nat",
-                            "hook": "postrouting",
-                            "prio": 100,
-                            "policy": "accept"
-                        }
-                    }
-                },
-                {
-                    "add": {
-                        "rule": {
-                            "family": "ip",
-                            "table": "nat",
-                            "chain": "PREROUTING",
-                            "expr": [
-                                {
-                                    "match": {
-                                        "op": "==",
-                                        "left": {
-                                            "payload": {
-                                                "protocol": "ip",
-                                                "field": "daddr"
-                                            }
-                                        },
-                                        "right": host_ip
-                                    }
-                                },
-                                {
-                                    "match": {
-                                        "op": "==",
-                                        "left": {
-                                            "payload": {
-                                                "protocol": protocol,
-                                                "field": "dport"
-                                            }
-                                        },
-                                        "right": host_port
-                                    }
-                                },
-                                {
-                                    "dnat": {
-                                        "addr": dest_ip,
-                                        "port": dest_port
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                },
-                {
-                    "add": {
-                        "rule": {
-                            "family": "ip",
-                            "table": "nat",
-                            "chain": "POSTROUTING",
-                            "expr": [
-                                {
-                                    "match": {
-                                        "op": "==",
-                                        "left": {
-                                            "payload": {
-                                                "protocol": "ip",
-                                                "field": "saddr"
-                                            }
-                                        },
-                                        "right": {
-                                            "prefix": {
-                                                "addr": dest_ip,
-                                                "len": 32
-                                            }
-                                        }
-                                    }
-                                },
-                                {
-                                    "masquerade": None
-                                }
-                            ]
-                        }
-                    }
-                }
-            ]
-        }
-
         try:
-            for rule in rules["nftables"]:
-                rc, output, error = self._nft.json_cmd({"nftables": [rule]})
-                if rc != 0 and "File exists" not in str(error):
-                    raise NetworkError(f"Failed to add port forwarding rule: {error}")
+            # Validate IP addresses first
+            import ipaddress
+
+            try:
+                ipaddress.ip_address(host_ip)
+                ipaddress.ip_address(dest_ip)
+            except ValueError as e:
+                raise NetworkError(f"Invalid IP address: {str(e)}")
+
+            # First check if the rules already exist
+            existing_rules = self.get_port_forward_handles(
+                host_ip, host_port, dest_ip, dest_port
+            )
+            if existing_rules:
+                if self._config.verbose:
+                    self.logger.info("Port forwarding rules already exist")
+                return
+
+            # Create direct rule files for nftables to avoid hostname resolution issues
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
+                rules_file = f.name
+                # Write structured nftables ruleset
+                f.write("#!/usr/sbin/nft -f\n\n")
+                f.write("# Create nat table if it doesn't exist\n")
+                f.write("add table ip nat\n\n")
+
+                f.write("# Create chains if they don't exist\n")
+                f.write(
+                    "add chain ip nat PREROUTING { type nat hook prerouting priority -100; policy accept; }\n"
+                )
+                f.write(
+                    "add chain ip nat POSTROUTING { type nat hook postrouting priority 100; policy accept; }\n\n"
+                )
+
+                f.write("# Add port forwarding rules\n")
+                f.write(
+                    f"add rule ip nat PREROUTING ip daddr {host_ip} {protocol} dport {host_port} counter dnat to {dest_ip}:{dest_port}\n"
+                )
+                f.write(
+                    f"add rule ip nat POSTROUTING ip saddr {dest_ip} counter masquerade\n"
+                )
+
+            # Run nft with the rules file
+            from firecracker.utils import run
+
+            result = run(f"nft -f {rules_file}")
+
+            # Clean up the temp file
+            import os
+
+            os.unlink(rules_file)
+
+            if result.returncode != 0:
+                if self._config.verbose:
+                    self.logger.error(
+                        f"Failed to add port forwarding rules: {result.stderr}"
+                    )
+                raise NetworkError(
+                    f"Failed to add port forwarding rules: {result.stderr}"
+                )
 
             if self._config.verbose:
-                self.logger.info(f"Added port forwarding rule: {host_ip}:{host_port} -> {dest_ip}:{dest_port}")
+                self.logger.info(
+                    f"Added port forwarding rule: {host_ip}:{host_port} -> {dest_ip}:{dest_port}"
+                )
 
         except Exception as e:
+            if self._config.verbose:
+                self.logger.error(f"Port forwarding error: {str(e)}")
             raise NetworkError(f"Failed to add port forwarding rules: {str(e)}")
 
     def delete_rule(self, rule):
@@ -677,7 +720,9 @@ class NetworkManager:
                 if rc == 0:
                     self.logger.info(f"Rule with handle {rule['handle']} deleted")
                 else:
-                    self.logger.error(f"Error deleting rule with handle {rule['handle']}: {error}")
+                    self.logger.error(
+                        f"Error deleting rule with handle {rule['handle']}: {error}"
+                    )
 
             return rc == 0
 
@@ -693,14 +738,18 @@ class NetworkManager:
         rules = self.get_nat_rules()
         tap_rules = self.find_tap_interface_rules(rules, tap_name)
         if self._config.verbose:
-            self.logger.info(f"Found {len(rules)} total rules and {len(tap_rules)} rules for {tap_name}")
+            self.logger.info(
+                f"Found {len(rules)} total rules and {len(tap_rules)} rules for {tap_name}"
+            )
 
         for rule in tap_rules:
             if self._config.verbose:
                 self.logger.debug(f"Deleting rule: {rule}")
             self.delete_rule(rule)
 
-    def delete_port_forward(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int):
+    def delete_port_forward(
+        self, host_ip: str, host_port: int, dest_ip: str, dest_port: int
+    ):
         """Delete port forwarding rules.
 
         Args:
@@ -712,78 +761,100 @@ class NetworkManager:
         Raises:
             NetworkError: If deleting port forwarding rules fails.
         """
-        rules = self.get_port_forward_handles(host_ip, host_port, dest_ip, dest_port)
-        if not rules:
-            if self._config.verbose:
-                self.logger.info("No port forwarding rules found to delete")
-            return
-
         try:
-            if 'prerouting' in rules:
-                handle = rules['prerouting']
-                cmd = f'delete rule nat PREROUTING handle {handle}'
-                rc, output, error = self._nft.cmd(cmd)
-
+            # Find existing rules first to get the handles
+            rules = self.get_port_forward_handles(
+                host_ip, host_port, dest_ip, dest_port
+            )
+            if not rules:
                 if self._config.verbose:
-                    if rc == 0:
-                        self.logger.info(f"Prerouting rule with handle {handle} deleted")
-                    else:
-                        self.logger.warn(f"Error deleting prerouting rule with handle {handle}: {error}")
+                    self.logger.info("No port forwarding rules found to delete")
+                return
 
-            if 'postrouting' in rules:
-                handle = rules['postrouting']
-                # Always use uppercase POSTROUTING as that's the standard in nftables
-                cmd = f'delete rule nat POSTROUTING handle {handle}'
-                rc, output, error = self._nft.cmd(cmd)
+            # Create a temporary file with delete commands
+            import tempfile
 
+            with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
+                rules_file = f.name
+                f.write("#!/usr/sbin/nft -f\n\n")
+
+                # Delete rules by handle if found
+                if "prerouting" in rules:
+                    handle = rules["prerouting"]
+                    f.write(f"delete rule ip nat PREROUTING handle {handle}\n")
+
+                if "postrouting" in rules:
+                    handle = rules["postrouting"]
+                    f.write(f"delete rule ip nat POSTROUTING handle {handle}\n")
+
+            # Run nft with the rules file
+            from firecracker.utils import run
+
+            result = run(f"nft -f {rules_file}")
+
+            # Clean up the temp file
+            import os
+
+            os.unlink(rules_file)
+
+            if result.returncode != 0:
                 if self._config.verbose:
-                    if rc == 0:
-                        self.logger.info(f"Postrouting rule with handle {handle} deleted")
-                    else:
-                        self.logger.warn(f"Error deleting postrouting rule with handle {handle}: {error}")
+                    self.logger.error(
+                        f"Failed to delete port forwarding rules: {result.stderr}"
+                    )
+                if "No such file or directory" not in str(result.stderr):
+                    raise NetworkError(
+                        f"Failed to delete port forwarding rules: {result.stderr}"
+                    )
+
+            if self._config.verbose:
+                self.logger.info(
+                    f"Deleted port forwarding: {host_ip}:{host_port} -> {dest_ip}:{dest_port}"
+                )
 
         except Exception as e:
+            if self._config.verbose:
+                self.logger.error(f"Error deleting port forwarding: {str(e)}")
             raise NetworkError(f"Failed to delete port forward rules: {str(e)}")
 
     def detect_cidr_conflict(self, ip_address: str, prefix_len: int = 24) -> bool:
         """Check if the given IP address and prefix length conflict with existing interfaces.
-        
+
         Args:
             ip_address (str): IP address to check for conflicts
             prefix_len (int): Network prefix length (default 24 for /24 networks)
-            
+
         Returns:
             bool: True if a conflict exists, False otherwise
-            
+
         Raises:
             NetworkError: If the IP address format is invalid
         """
         try:
             # Create network object from the given IP and prefix
             new_network = IPv4Network(f"{ip_address}/{prefix_len}", strict=False)
-            
+
             with IPRoute() as ipr:
                 # Get all interfaces
                 interfaces = ipr.get_links()
-                
+
                 for interface in interfaces:
-                    idx = interface['index']
+                    idx = interface["index"]
                     # Get addresses for each interface
                     addresses = ipr.get_addr(index=idx)
-                    
+
                     for addr in addresses:
-                        for attr_name, attr_value in addr.get('attrs', []):
-                            if attr_name == 'IFA_ADDRESS':
+                        for attr_name, attr_value in addr.get("attrs", []):
+                            if attr_name == "IFA_ADDRESS":
                                 # Skip IPv6 addresses
-                                if ':' in attr_value:
+                                if ":" in attr_value:
                                     continue
-                                
-                                existing_prefix = addr.get('prefixlen', 24)
+
+                                existing_prefix = addr.get("prefixlen", 24)
                                 existing_network = IPv4Network(
-                                    f"{attr_value}/{existing_prefix}", 
-                                    strict=False
+                                    f"{attr_value}/{existing_prefix}", strict=False
                                 )
-                                
+
                                 # Check for network overlap
                                 if new_network.overlaps(existing_network):
                                     if self._config.verbose:
@@ -792,53 +863,60 @@ class NetworkManager:
                                             f"overlaps with existing {existing_network}"
                                         )
                                     return True
-            
+
             return False
-            
+
         except (AddressValueError, ValueError) as e:
             raise NetworkError(f"Invalid IP address format: {str(e)}")
         except Exception as e:
             raise NetworkError(f"Failed to check CIDR conflicts: {str(e)}")
-            
-    def suggest_non_conflicting_ip(self, preferred_ip: str, prefix_len: int = 24) -> str:
+
+    def suggest_non_conflicting_ip(
+        self, preferred_ip: str, prefix_len: int = 24
+    ) -> str:
         """Suggest a non-conflicting IP address based on the preferred IP.
-        
+
         Args:
             preferred_ip (str): Preferred IP address
             prefix_len (int): Network prefix length
-            
+
         Returns:
             str: A non-conflicting IP address
-            
+
         Raises:
             NetworkError: If unable to find non-conflicting IP
         """
         try:
             # Start with the preferred network
             ip_obj = ipaddress.ip_address(preferred_ip)
-            
+
             # Try up to 10 alternative networks by incrementing the third octet
             for i in range(10):
                 # Calculate a new network address with incremented third octet
                 if isinstance(ip_obj, IPv4Address):
                     # Extract octets
-                    octets = str(ip_obj).split('.')
+                    octets = str(ip_obj).split(".")
                     # Increment third octet and wrap around if needed
                     new_third_octet = (int(octets[2]) + i + 1) % 256
                     new_ip = f"{octets[0]}.{octets[1]}.{new_third_octet}.{octets[3]}"
-                    
+
                     if not self.detect_cidr_conflict(new_ip, prefix_len):
                         if self._config.verbose:
                             self.logger.info(f"Suggested non-conflicting IP: {new_ip}")
                         return new_ip
-            
+
             raise NetworkError("Unable to find a non-conflicting IP address")
-            
+
         except Exception as e:
             raise NetworkError(f"Failed to suggest non-conflicting IP: {str(e)}")
 
-    def create_tap(self, name: str = None, iface_name: str = None,
-                   gateway_ip: str = None, bridge: bool = False) -> None:
+    def create_tap(
+        self,
+        name: str = None,
+        iface_name: str = None,
+        gateway_ip: str = None,
+        bridge: bool = False,
+    ) -> None:
         """Create and configure a new tap device using pyroute2.
 
         Args:
@@ -862,7 +940,7 @@ class NetworkManager:
                 if self._config.verbose:
                     self.logger.info(f"Creating tap device {name}")
                 with IPRoute() as ipr:
-                    ipr.link('add', ifname=name, kind='tuntap', mode='tap')
+                    ipr.link("add", ifname=name, kind="tuntap", mode="tap")
                     if self._config.verbose:
                         self.logger.info(f"Created tap device {name}")
 
@@ -870,7 +948,7 @@ class NetworkManager:
                         self.attach_tap_to_bridge(iface_name, self._config.bridge_name)
 
                     idx = ipr.link_lookup(ifname=name)[0]
-                    ipr.link('set', index=idx, state='up')
+                    ipr.link("set", index=idx, state="up")
                     if self._config.verbose:
                         self.logger.info(f"Set tap device {name} up")
 
@@ -883,17 +961,21 @@ class NetworkManager:
                             # Check for CIDR conflicts
                             if self.detect_cidr_conflict(gateway_ip, 24):
                                 # Attempt to find a non-conflicting IP
-                                alternative_ip = self.suggest_non_conflicting_ip(gateway_ip, 24)
+                                alternative_ip = self.suggest_non_conflicting_ip(
+                                    gateway_ip, 24
+                                )
                                 if self._config.verbose:
                                     self.logger.warn(
                                         f"IP conflict detected with {gateway_ip}. "
                                         f"Using alternative: {alternative_ip}"
                                     )
                                 gateway_ip = alternative_ip
-                                
-                            ipr.addr('add', index=idx, address=gateway_ip, prefixlen=24)
+
+                            ipr.addr("add", index=idx, address=gateway_ip, prefixlen=24)
                             if self._config.verbose:
-                                self.logger.info(f"Set {gateway_ip} as gateway on tap device {name}")
+                                self.logger.info(
+                                    f"Set {gateway_ip} as gateway on tap device {name}"
+                                )
                         except Exception as e:
                             raise NetworkError(f"Failed to set gateway IP: {str(e)}")
 
@@ -913,9 +995,11 @@ class NetworkManager:
             with IPRoute() as ipr:
                 bridge_idx = ipr.link_lookup(ifname=bridge_name)[0]
                 idx = ipr.link_lookup(ifname=iface_name)[0]
-                ipr.link('set', index=idx, master=bridge_idx)
+                ipr.link("set", index=idx, master=bridge_idx)
                 if self._config.verbose:
-                    self.logger.info(f"Attached tap device {iface_name} to bridge {bridge_name}")
+                    self.logger.info(
+                        f"Attached tap device {iface_name} to bridge {bridge_name}"
+                    )
             return True
 
         except Exception as e:
@@ -932,7 +1016,7 @@ class NetworkManager:
         with IPRoute() as ipr:
             if self.check_tap_device(name):
                 idx = ipr.link_lookup(ifname=name)[0]
-                ipr.link('del', index=idx)
+                ipr.link("del", index=idx)
                 if self._config.verbose:
                     self.logger.info(f"Removed tap device {name}")
 
@@ -945,7 +1029,7 @@ class NetworkManager:
         try:
             if self._config.verbose:
                 self.logger.info(f"Beginning thorough cleanup for {tap_device}")
-            
+
             # Get the IP address associated with this tap device
             tap_ip = None
             with IPRoute() as ipr:
@@ -954,8 +1038,8 @@ class NetworkManager:
                     # Get addresses for the interface
                     addresses = ipr.get_addr(index=idx)
                     for addr in addresses:
-                        for attr_name, attr_value in addr.get('attrs', []):
-                            if attr_name == 'IFA_ADDRESS':
+                        for attr_name, attr_value in addr.get("attrs", []):
+                            if attr_name == "IFA_ADDRESS":
                                 tap_ip = attr_value
                                 break
 
@@ -964,32 +1048,36 @@ class NetworkManager:
                 if self._config.verbose:
                     self.logger.info(f"Deleting firewall rules for {tap_device}")
                 self.delete_nat_rules(tap_device)
-            
+
             # Delete the tap device itself
             self.delete_tap(tap_device)
-            
+
             # Clear the ARP cache if we know the IP
             if tap_ip:
                 if self._config.verbose:
                     self.logger.info(f"Clearing ARP cache entry for {tap_ip}")
-                run(f"ip neigh del {tap_ip} dev {self.get_interface_name()} 2>/dev/null || true")
-                
+                run(
+                    f"ip neigh del {tap_ip} dev {self.get_interface_name()} 2>/dev/null || true"
+                )
+
             # Check for stale routes and remove them
             if tap_ip:
-                network_prefix = '.'.join(tap_ip.split('.')[:3]) + '.0/24'
+                network_prefix = ".".join(tap_ip.split(".")[:3]) + ".0/24"
                 if self._config.verbose:
-                    self.logger.info(f"Checking for stale routes to network {network_prefix}")
+                    self.logger.info(
+                        f"Checking for stale routes to network {network_prefix}"
+                    )
                 # Delete any routes to this network through the tap device
                 run(f"ip route del {network_prefix} 2>/dev/null || true")
-            
+
             # Flush the IP rule cache
             if self._config.verbose:
                 self.logger.info("Flushing routing cache")
             run("ip route flush cache 2>/dev/null || true")
-                
+
             if self._config.verbose:
                 self.logger.info(f"Cleanup for {tap_device} completed successfully")
-                
+
         except Exception as e:
             self.logger.error(f"Error during cleanup of {tap_device}: {str(e)}")
             # Continue with cleanup despite errors
@@ -1028,11 +1116,23 @@ class NetworkManager:
                                 "table": "filter",
                                 "chain": "FORWARD",
                                 "expr": [
-                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": iface_name}},
-                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": tap_name}},
+                                    {
+                                        "match": {
+                                            "left": {"meta": {"key": "iifname"}},
+                                            "op": "==",
+                                            "right": iface_name,
+                                        }
+                                    },
+                                    {
+                                        "match": {
+                                            "left": {"meta": {"key": "oifname"}},
+                                            "op": "==",
+                                            "right": tap_name,
+                                        }
+                                    },
                                     {"counter": {"packets": 0, "bytes": 0}},
-                                    {"accept": None}
-                                ]
+                                    {"accept": None},
+                                ],
                             }
                         }
                     },
@@ -1043,14 +1143,26 @@ class NetworkManager:
                                 "table": "filter",
                                 "chain": "FORWARD",
                                 "expr": [
-                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": tap_name}},
-                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": iface_name}},
+                                    {
+                                        "match": {
+                                            "left": {"meta": {"key": "iifname"}},
+                                            "op": "==",
+                                            "right": tap_name,
+                                        }
+                                    },
+                                    {
+                                        "match": {
+                                            "left": {"meta": {"key": "oifname"}},
+                                            "op": "==",
+                                            "right": iface_name,
+                                        }
+                                    },
                                     {"counter": {"packets": 0, "bytes": 0}},
-                                    {"accept": None}
-                                ]
+                                    {"accept": None},
+                                ],
                             }
                         }
-                    }
+                    },
                 ]
             }
 
