@@ -6,6 +6,7 @@ from firecracker.utils import run
 from firecracker.config import MicroVMConfig
 from firecracker.exceptions import NetworkError, ConfigurationError
 from ipaddress import IPv4Address, IPv4Network, AddressValueError
+import os
 
 sys.path.append("/usr/lib/python3/dist-packages")
 try:
@@ -493,118 +494,232 @@ class NetworkManager:
             NetworkError: If retrieving nftables rules fails.
         """
         list_cmd = {"nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]}
-
+        
+        # Alternative direct command approach
         try:
-            output = self._nft.json_cmd(list_cmd)
-            result = output[1]["nftables"]
-            rules = {}
-
-            for item in result:
-                if "rule" not in item:
-                    continue
-
-                rule = item["rule"]
-                chain = rule.get(
-                    "chain", ""
-                ).upper()  # Normalize chain name to uppercase
-
-                # Check for PREROUTING rules (for incoming traffic)
-                if (
-                    rule.get("family") == "ip"
-                    and rule.get("table") == "nat"
-                    and chain == "PREROUTING"
-                ):
-                    expr = rule.get("expr", [])
-
-                    has_daddr_match = False
-                    has_dport_match = False
-                    has_correct_dnat = False
-
-                    for e in expr:
-                        if (
-                            "match" in e
-                            and e["match"]["op"] == "=="
-                            and "payload" in e["match"]["left"]
-                            and e["match"]["left"]["payload"]["field"] == "daddr"
-                            and e["match"]["right"] == host_ip
-                        ):
-                            has_daddr_match = True
-
-                        if (
-                            "match" in e
-                            and e["match"]["op"] == "=="
-                            and "payload" in e["match"]["left"]
-                            and e["match"]["left"]["payload"]["field"] == "dport"
-                            and e["match"]["right"] == host_port
-                        ):
-                            has_dport_match = True
-
-                        if (
-                            "dnat" in e
-                            and e["dnat"]["addr"] == dest_ip
-                            and e["dnat"]["port"] == dest_port
-                        ):
-                            has_correct_dnat = True
-                            if self._config.verbose:
-                                self.logger.info(
-                                    f"Prerouting rule: {dest_ip}:{dest_port}"
-                                )
-
-                    if has_daddr_match and has_dport_match and has_correct_dnat:
-                        if self._config.verbose:
-                            self.logger.debug(
-                                f"Found matching prerouting port forward rule {rule}"
-                            )
-                            self.logger.info(
-                                f"Found prerouting rule with handle {rule['handle']}"
-                            )
-                        rules["prerouting"] = rule["handle"]
-
-                # Check for POSTROUTING rules (for outgoing traffic)
-                elif (
-                    rule.get("family") == "ip"
-                    and rule.get("table") == "nat"
-                    and chain == "POSTROUTING"
-                ):
-                    expr = rule.get("expr", [])
-                    has_saddr_match = False
-                    has_masquerade = False
-
-                    for e in expr:
-                        # Check for source address match (VM's IP)
-                        if (
-                            "match" in e
-                            and e["match"]["op"] == "=="
-                            and "payload" in e["match"]["left"]
-                            and e["match"]["left"]["payload"]["field"] == "saddr"
-                        ):
-                            if e["match"]["right"] == dest_ip or (
-                                isinstance(e["match"]["right"], dict)
-                                and "prefix" in e["match"]["right"]
-                                and e["match"]["right"]["prefix"]["addr"] == dest_ip
+            from subprocess import run as subprocess_run
+            import shutil
+            import json
+            
+            # Find the full path to the nft binary
+            nft_path = shutil.which("nft")
+            if not nft_path:
+                nft_path = "/sbin/nft"  # Default path on most systems
+                if not os.path.exists(nft_path):
+                    nft_path = "/usr/sbin/nft"  # Alternative path
+                    if not os.path.exists(nft_path):
+                        raise NetworkError("Could not find nft executable in PATH or standard locations")
+            
+            # Use the direct command approach with JSON output
+            cmd = f"{nft_path} -j list table nat"
+            result = subprocess_run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                if "No such file or directory" in result.stderr:
+                    return {}  # Table doesn't exist
+                raise NetworkError(f"Failed to get nftables rules: {result.stderr}")
+                
+            try:
+                output = json.loads(result.stdout)
+                rules = {}
+                
+                # Process the rules from JSON output
+                for item in output.get("nftables", []):
+                    if "rule" not in item:
+                        continue
+                        
+                    rule = item["rule"]
+                    chain = rule.get("chain", "").lower()  # Normalize chain name to lowercase
+                    
+                    # Check for prerouting rules (for incoming traffic)
+                    if rule.get("table") == "nat" and chain == "prerouting":
+                        expr = rule.get("expr", [])
+                        
+                        has_daddr_match = False
+                        has_dport_match = False
+                        has_correct_dnat = False
+                        
+                        for e in expr:
+                            if (
+                                "match" in e
+                                and e["match"]["op"] == "=="
+                                and "payload" in e["match"]["left"]
+                                and e["match"]["left"]["payload"]["field"] == "daddr"
+                                and e["match"]["right"] == host_ip
                             ):
-                                has_saddr_match = True
-
-                        if "masquerade" in e:
-                            has_masquerade = True
-
-                    if has_saddr_match and has_masquerade:
-                        if self._config.verbose:
-                            self.logger.debug(
-                                f"Found matching postrouting masquerade rule {rule}"
-                            )
-                            self.logger.info(
-                                f"Found postrouting rule with handle {rule['handle']}"
-                            )
-                        rules["postrouting"] = rule["handle"]
-
-            if not rules and self._config.verbose:
-                self.logger.info("No port forwarding rules found")
-
-            return rules
-
+                                has_daddr_match = True
+                                
+                            if (
+                                "match" in e
+                                and e["match"]["op"] == "=="
+                                and "payload" in e["match"]["left"]
+                                and e["match"]["left"]["payload"]["field"] == "dport"
+                                and e["match"]["right"] == host_port
+                            ):
+                                has_dport_match = True
+                                
+                            if (
+                                "dnat" in e
+                                and e["dnat"]["addr"] == dest_ip
+                                and e["dnat"]["port"] == dest_port
+                            ):
+                                has_correct_dnat = True
+                                
+                        if has_daddr_match and has_dport_match and has_correct_dnat:
+                            if self._config.verbose:
+                                self.logger.info(f"Found prerouting rule with handle {rule['handle']}")
+                            rules["prerouting"] = rule["handle"]
+                            
+                    # Check for postrouting rules (for outgoing traffic)
+                    elif rule.get("table") == "nat" and chain == "postrouting":
+                        expr = rule.get("expr", [])
+                        has_saddr_match = False
+                        has_masquerade = False
+                        
+                        for e in expr:
+                            # Check for source address match (VM's IP)
+                            if (
+                                "match" in e
+                                and e["match"]["op"] == "=="
+                                and "payload" in e["match"]["left"]
+                                and e["match"]["left"]["payload"]["field"] == "saddr"
+                            ):
+                                if e["match"]["right"] == dest_ip or (
+                                    isinstance(e["match"]["right"], dict)
+                                    and "prefix" in e["match"]["right"]
+                                    and e["match"]["right"]["prefix"]["addr"] == dest_ip
+                                ):
+                                    has_saddr_match = True
+                                    
+                            if "masquerade" in e:
+                                has_masquerade = True
+                                
+                        if has_saddr_match and has_masquerade:
+                            if self._config.verbose:
+                                self.logger.info(f"Found postrouting rule with handle {rule['handle']}")
+                            rules["postrouting"] = rule["handle"]
+                            
+                return rules
+                
+            except json.JSONDecodeError:
+                if self._config.verbose:
+                    self.logger.warn("Failed to parse JSON output from nft command")
+                return {}
+                
         except Exception as e:
-            raise NetworkError(f"Failed to get nftables rules: {str(e)}")
+            if self._config.verbose:
+                self.logger.warn(f"Error using direct command approach: {str(e)}")
+            
+            # Fall back to the original implementation
+            try:
+                output = self._nft.json_cmd(list_cmd)
+                result = output[1]["nftables"]
+                rules = {}
+
+                for item in result:
+                    if "rule" not in item:
+                        continue
+
+                    rule = item["rule"]
+                    chain = rule.get("chain", "").lower()  # Normalize chain name to lowercase
+
+                    # Check for prerouting rules (for incoming traffic)
+                    if (
+                        rule.get("family") == "ip"
+                        and rule.get("table") == "nat"
+                        and chain == "prerouting"
+                    ):
+                        expr = rule.get("expr", [])
+
+                        has_daddr_match = False
+                        has_dport_match = False
+                        has_correct_dnat = False
+
+                        for e in expr:
+                            if (
+                                "match" in e
+                                and e["match"]["op"] == "=="
+                                and "payload" in e["match"]["left"]
+                                and e["match"]["left"]["payload"]["field"] == "daddr"
+                                and e["match"]["right"] == host_ip
+                            ):
+                                has_daddr_match = True
+
+                            if (
+                                "match" in e
+                                and e["match"]["op"] == "=="
+                                and "payload" in e["match"]["left"]
+                                and e["match"]["left"]["payload"]["field"] == "dport"
+                                and e["match"]["right"] == host_port
+                            ):
+                                has_dport_match = True
+
+                            if (
+                                "dnat" in e
+                                and e["dnat"]["addr"] == dest_ip
+                                and e["dnat"]["port"] == dest_port
+                            ):
+                                has_correct_dnat = True
+                                if self._config.verbose:
+                                    self.logger.info(
+                                        f"Prerouting rule: {dest_ip}:{dest_port}"
+                                    )
+
+                        if has_daddr_match and has_dport_match and has_correct_dnat:
+                            if self._config.verbose:
+                                self.logger.debug(
+                                    f"Found matching prerouting port forward rule {rule}"
+                                )
+                                self.logger.info(
+                                    f"Found prerouting rule with handle {rule['handle']}"
+                                )
+                            rules["prerouting"] = rule["handle"]
+
+                    # Check for postrouting rules (for outgoing traffic)
+                    elif (
+                        rule.get("family") == "ip"
+                        and rule.get("table") == "nat"
+                        and chain == "postrouting"
+                    ):
+                        expr = rule.get("expr", [])
+                        has_saddr_match = False
+                        has_masquerade = False
+
+                        for e in expr:
+                            # Check for source address match (VM's IP)
+                            if (
+                                "match" in e
+                                and e["match"]["op"] == "=="
+                                and "payload" in e["match"]["left"]
+                                and e["match"]["left"]["payload"]["field"] == "saddr"
+                            ):
+                                if e["match"]["right"] == dest_ip or (
+                                    isinstance(e["match"]["right"], dict)
+                                    and "prefix" in e["match"]["right"]
+                                    and e["match"]["right"]["prefix"]["addr"] == dest_ip
+                                ):
+                                    has_saddr_match = True
+
+                            if "masquerade" in e:
+                                has_masquerade = True
+
+                        if has_saddr_match and has_masquerade:
+                            if self._config.verbose:
+                                self.logger.debug(
+                                    f"Found matching postrouting masquerade rule {rule}"
+                                )
+                                self.logger.info(
+                                    f"Found postrouting rule with handle {rule['handle']}"
+                                )
+                            rules["postrouting"] = rule["handle"]
+
+                if not rules and self._config.verbose:
+                    self.logger.info("No port forwarding rules found")
+
+                return rules
+
+            except Exception as e:
+                raise NetworkError(f"Failed to get nftables rules: {str(e)}")
 
     def add_port_forward(
         self,
@@ -644,16 +759,26 @@ class NetworkManager:
                     self.logger.info("Port forwarding rules already exist")
                 return
 
-            # Use direct command execution instead of nftables JSON
+            # Use direct command execution with proper syntax
             from subprocess import run as subprocess_run
+            import shutil
             
-            # Create a batch of commands (more reliable than JSON API)
+            # Find the full path to the nft binary
+            nft_path = shutil.which("nft")
+            if not nft_path:
+                nft_path = "/sbin/nft"  # Default path on most systems
+                if not os.path.exists(nft_path):
+                    nft_path = "/usr/sbin/nft"  # Alternative path
+                    if not os.path.exists(nft_path):
+                        raise NetworkError("Could not find nft executable in PATH or standard locations")
+            
+            # Create commands with proper syntax (using single quotes for complex commands)
             commands = [
-                "nft add table ip nat 2>/dev/null || true",
-                "nft add chain ip nat PREROUTING { type nat hook prerouting priority -100\; policy accept\; } 2>/dev/null || true",
-                "nft add chain ip nat POSTROUTING { type nat hook postrouting priority 100\; policy accept\; } 2>/dev/null || true",
-                f"nft add rule ip nat PREROUTING ip daddr {host_ip} {protocol} dport {host_port} counter dnat to {dest_ip}:{dest_port}",
-                f"nft add rule ip nat POSTROUTING ip saddr {dest_ip} counter masquerade"
+                f"{nft_path} add table nat",
+                f"{nft_path} 'add chain nat postrouting {{ type nat hook postrouting priority 100 ; }}'",
+                f"{nft_path} 'add chain nat prerouting {{ type nat hook prerouting priority -100; }}'",
+                f"{nft_path} 'add rule nat prerouting ip daddr {host_ip} {protocol} dport {host_port} counter dnat to {dest_ip}:{dest_port}'",
+                f"{nft_path} 'add rule nat postrouting ip saddr {dest_ip} counter masquerade'"
             ]
             
             # Execute each command separately
@@ -748,34 +873,58 @@ class NetworkManager:
             rules = self.get_port_forward_handles(
                 host_ip, host_port, dest_ip, dest_port
             )
+            
+            # If there are no rules to delete, just return
             if not rules:
                 if self._config.verbose:
                     self.logger.info("No port forwarding rules found to delete")
                 return
 
-            # Use direct command execution instead of file-based operations
+            # Use direct command execution with proper syntax
             from subprocess import run as subprocess_run
+            import shutil
             
-            # Delete rules by handle if found
-            for rule_type, handle in rules.items():
-                chain = "PREROUTING" if rule_type == "prerouting" else "POSTROUTING"
-                cmd = f"nft delete rule ip nat {chain} handle {handle}"
-                
-                if self._config.verbose:
-                    self.logger.debug(f"Running nftables command: {cmd}")
-                
-                result = subprocess_run(cmd, shell=True, capture_output=True, text=True)
-                
-                if result.returncode != 0:
+            # Find the full path to the nft binary
+            nft_path = shutil.which("nft")
+            if not nft_path:
+                nft_path = "/sbin/nft"  # Default path on most systems
+                if not os.path.exists(nft_path):
+                    nft_path = "/usr/sbin/nft"  # Alternative path
+                    if not os.path.exists(nft_path):
+                        raise NetworkError("Could not find nft executable in PATH or standard locations")
+            
+            # If we have handles, delete those specific rules
+            if rules:
+                for rule_type, handle in rules.items():
+                    chain = "prerouting" if rule_type == "prerouting" else "postrouting"
+                    cmd = f"{nft_path} 'delete rule nat {chain} handle {handle}'"
+                    
                     if self._config.verbose:
-                        self.logger.error(
-                            f"Command failed: {cmd}\nError: {result.stderr}"
-                        )
-                    # If the rule doesn't exist, that's ok
-                    if "No such file or directory" not in str(result.stderr):
-                        raise NetworkError(
-                            f"Failed to delete port forwarding rule: {result.stderr}"
-                        )
+                        self.logger.debug(f"Running nftables command: {cmd}")
+                    
+                    result = subprocess_run(cmd, shell=True, capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        if self._config.verbose:
+                            self.logger.error(
+                                f"Command failed: {cmd}\nError: {result.stderr}"
+                            )
+                        # If the rule doesn't exist, that's ok
+                        if "No such file or directory" not in str(result.stderr):
+                            raise NetworkError(
+                                f"Failed to delete port forwarding rule: {result.stderr}"
+                            )
+            # Fall back to direct rule deletion if handles not found
+            else:
+                # Direct command to delete the rule by matching its properties
+                commands = [
+                    f"{nft_path} 'delete rule nat prerouting ip daddr {host_ip} tcp dport {host_port} counter dnat to {dest_ip}:{dest_port}'",
+                    f"{nft_path} 'delete rule nat postrouting ip saddr {dest_ip} counter masquerade'"
+                ]
+                
+                for cmd in commands:
+                    subprocess_run(cmd, shell=True, capture_output=True, text=True)
+                    # We don't check for errors here as these may fail if rules don't exist
 
             if self._config.verbose:
                 self.logger.info(
