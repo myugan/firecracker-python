@@ -629,7 +629,6 @@ class NetworkManager:
         try:
             # Validate IP addresses first
             import ipaddress
-
             try:
                 ipaddress.ip_address(host_ip)
                 ipaddress.ip_address(dest_ip)
@@ -645,50 +644,33 @@ class NetworkManager:
                     self.logger.info("Port forwarding rules already exist")
                 return
 
-            # Create direct rule files for nftables to avoid hostname resolution issues
-            import tempfile
-
-            with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
-                rules_file = f.name
-                # Write structured nftables ruleset
-                f.write("#!/usr/sbin/nft -f\n\n")
-                f.write("# Create nat table if it doesn't exist\n")
-                f.write("add table ip nat\n\n")
-
-                f.write("# Create chains if they don't exist\n")
-                f.write(
-                    "add chain ip nat PREROUTING { type nat hook prerouting priority -100; policy accept; }\n"
-                )
-                f.write(
-                    "add chain ip nat POSTROUTING { type nat hook postrouting priority 100; policy accept; }\n\n"
-                )
-
-                f.write("# Add port forwarding rules\n")
-                f.write(
-                    f"add rule ip nat PREROUTING ip daddr {host_ip} {protocol} dport {host_port} counter dnat to {dest_ip}:{dest_port}\n"
-                )
-                f.write(
-                    f"add rule ip nat POSTROUTING ip saddr {dest_ip} counter masquerade\n"
-                )
-
-            # Run nft with the rules file
-            from firecracker.utils import run
-
-            result = run(f"nft -f {rules_file}")
-
-            # Clean up the temp file
-            import os
-
-            os.unlink(rules_file)
-
-            if result.returncode != 0:
+            # Use direct command execution instead of nftables JSON
+            from subprocess import run as subprocess_run
+            
+            # Create a batch of commands (more reliable than JSON API)
+            commands = [
+                "nft add table ip nat 2>/dev/null || true",
+                "nft add chain ip nat PREROUTING { type nat hook prerouting priority -100\; policy accept\; } 2>/dev/null || true",
+                "nft add chain ip nat POSTROUTING { type nat hook postrouting priority 100\; policy accept\; } 2>/dev/null || true",
+                f"nft add rule ip nat PREROUTING ip daddr {host_ip} {protocol} dport {host_port} counter dnat to {dest_ip}:{dest_port}",
+                f"nft add rule ip nat POSTROUTING ip saddr {dest_ip} counter masquerade"
+            ]
+            
+            # Execute each command separately
+            for cmd in commands:
                 if self._config.verbose:
-                    self.logger.error(
-                        f"Failed to add port forwarding rules: {result.stderr}"
+                    self.logger.debug(f"Running nftables command: {cmd}")
+                    
+                result = subprocess_run(cmd, shell=True, capture_output=True, text=True)
+                
+                if result.returncode != 0 and "File exists" not in result.stderr:
+                    if self._config.verbose:
+                        self.logger.error(
+                            f"Command failed: {cmd}\nError: {result.stderr}"
+                        )
+                    raise NetworkError(
+                        f"Failed to add port forwarding rule: {result.stderr}"
                     )
-                raise NetworkError(
-                    f"Failed to add port forwarding rules: {result.stderr}"
-                )
 
             if self._config.verbose:
                 self.logger.info(
@@ -771,41 +753,29 @@ class NetworkManager:
                     self.logger.info("No port forwarding rules found to delete")
                 return
 
-            # Create a temporary file with delete commands
-            import tempfile
-
-            with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
-                rules_file = f.name
-                f.write("#!/usr/sbin/nft -f\n\n")
-
-                # Delete rules by handle if found
-                if "prerouting" in rules:
-                    handle = rules["prerouting"]
-                    f.write(f"delete rule ip nat PREROUTING handle {handle}\n")
-
-                if "postrouting" in rules:
-                    handle = rules["postrouting"]
-                    f.write(f"delete rule ip nat POSTROUTING handle {handle}\n")
-
-            # Run nft with the rules file
-            from firecracker.utils import run
-
-            result = run(f"nft -f {rules_file}")
-
-            # Clean up the temp file
-            import os
-
-            os.unlink(rules_file)
-
-            if result.returncode != 0:
+            # Use direct command execution instead of file-based operations
+            from subprocess import run as subprocess_run
+            
+            # Delete rules by handle if found
+            for rule_type, handle in rules.items():
+                chain = "PREROUTING" if rule_type == "prerouting" else "POSTROUTING"
+                cmd = f"nft delete rule ip nat {chain} handle {handle}"
+                
                 if self._config.verbose:
-                    self.logger.error(
-                        f"Failed to delete port forwarding rules: {result.stderr}"
-                    )
-                if "No such file or directory" not in str(result.stderr):
-                    raise NetworkError(
-                        f"Failed to delete port forwarding rules: {result.stderr}"
-                    )
+                    self.logger.debug(f"Running nftables command: {cmd}")
+                
+                result = subprocess_run(cmd, shell=True, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    if self._config.verbose:
+                        self.logger.error(
+                            f"Command failed: {cmd}\nError: {result.stderr}"
+                        )
+                    # If the rule doesn't exist, that's ok
+                    if "No such file or directory" not in str(result.stderr):
+                        raise NetworkError(
+                            f"Failed to delete port forwarding rule: {result.stderr}"
+                        )
 
             if self._config.verbose:
                 self.logger.info(

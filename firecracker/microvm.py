@@ -571,10 +571,10 @@ class MicroVM:
             if id not in available_vmm_ids:
                 return f"VMM with ID {id} does not exist"
 
-            # Get the host IP address
-            host_ip = self._network.get_host_ip()
-            if not host_ip:
-                raise VMMError("Could not determine host IP address")
+            # Use 0.0.0.0 to listen on all interfaces instead of a specific host IP
+            host_ip = "0.0.0.0"
+            if self._config.verbose:
+                self._logger.info("Using 0.0.0.0 to listen on all interfaces")
 
             # Get the VM's IP address from the config file
             config_path = f"{self._config.data_path}/{id}/config.json"
