@@ -399,27 +399,6 @@ class NetworkManager:
         try:
             output = self._nft.json_cmd(list_cmd)
             result = output[1]['nftables']
-            # The output is a list of dictionaries, each containing a table, chain, or rule.
-            # We need to extract the rules from the list.
-            #
-            # Example output structure:
-            # rules = [
-            #     {'metainfo': {...}},                  # Metadata information
-            #     {'table': {...}},                     # Table definitions
-            #     {'chain': {...}},                     # Chain definitions
-            #     {'rule': {                            # Rule definitions
-            #         'family': 'ip',                   # IP family
-            #         'table': 'nat',                   # Table name
-            #         'chain': 'prerouting',            # Chain name
-            #         'handle': 16,                     # Rule handle (ID)
-            #         'expr': [                         # Rule expressions
-            #             {'match': {...}},             # Match conditions
-            #             {'dnat': {...}}               # Action to perform
-            #         ]
-            #     }},
-            #     ...
-            # ]
-
             rules = {}
 
             for item in result:
@@ -427,9 +406,10 @@ class NetworkManager:
                     continue
 
                 rule = item['rule']
+                chain = rule.get('chain', '').upper()  # Normalize chain name to uppercase
 
                 # Check for PREROUTING rules (for incoming traffic)
-                if rule.get('family') == 'ip' and rule.get('table') == 'nat' and rule.get('chain') == 'prerouting':
+                if rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'PREROUTING':
                     expr = rule.get('expr', [])
 
                     has_daddr_match = False
@@ -459,7 +439,7 @@ class NetworkManager:
                         rules['prerouting'] = rule['handle']
 
                 # Check for POSTROUTING rules (for outgoing traffic)
-                elif rule.get('family') == 'ip' and rule.get('table') == 'nat' and rule.get('chain') in ['postrouting', 'POSTROUTING']:
+                elif rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'POSTROUTING':
                     expr = rule.get('expr', [])
                     has_saddr_match = False
                     has_masquerade = False
@@ -499,167 +479,141 @@ class NetworkManager:
             host_port (int): Port to forward.
             dest_ip (str): IP address to forward to.
             dest_port (int): Port to forward to.
-            id (str): ID of the microVM.
+            protocol (str): Protocol to forward (default: "tcp").
 
         Raises:
             NetworkError: If adding nftables port forwarding rule fails.
         """
+        # First check if the rules already exist
+        existing_rules = self.get_port_forward_handles(host_ip, host_port, dest_ip, dest_port)
+        if existing_rules:
+            if self._config.verbose:
+                self.logger.info("Port forwarding rules already exist")
+            return
+
+        # Create the rules
         rules = {
             "nftables": [
                 {
-                    "table": {
-                        "family": "ip",
-                        "name": "nat",
-                        "handle": 91
+                    "add": {
+                        "table": {
+                            "family": "ip",
+                            "name": "nat"
+                        }
                     }
-                    },
+                },
                 {
-                    "chain": {
-                        "family": "ip",
-                        "table": "nat",
-                        "name": "PREROUTING",
-                        "handle": 2,
-                        "type": "nat",
-                        "hook": "prerouting",
-                        "prio": -100,
-                        "policy": "accept"
+                    "add": {
+                        "chain": {
+                            "family": "ip",
+                            "table": "nat",
+                            "name": "PREROUTING",
+                            "type": "nat",
+                            "hook": "prerouting",
+                            "prio": -100,
+                            "policy": "accept"
+                        }
                     }
-                    },
+                },
                 {
-                    "chain": {
-                        "family": "ip",
-                        "table": "nat",
-                        "name": "OUTPUT",
-                        "handle": 4,
-                        "type": "nat",
-                        "hook": "output",
-                        "prio": -100,
-                        "policy": "accept"
+                    "add": {
+                        "chain": {
+                            "family": "ip",
+                            "table": "nat",
+                            "name": "POSTROUTING",
+                            "type": "nat",
+                            "hook": "postrouting",
+                            "prio": 100,
+                            "policy": "accept"
+                        }
                     }
-                    },
+                },
                 {
-                    "chain": {
-                        "family": "ip",
-                        "table": "nat",
-                        "name": "POSTROUTING",
-                        "handle": 6,
-                        "type": "nat",
-                        "hook": "postrouting",
-                        "prio": 100,
-                        "policy": "accept"
-                    }
-                    },
-                {
-                    "chain": {
-                        "family": "ip",
-                        "table": "nat",
-                        "name": "postrouting",
-                        "handle": 11,
-                        "type": "nat",
-                        "hook": "postrouting",
-                        "prio": 100,
-                        "policy": "accept"
-                    }
-                    },
-                {
-                    "chain": {
-                        "family": "ip",
-                        "table": "nat",
-                        "name": "prerouting",
-                        "handle": 12,
-                        "type": "nat",
-                        "hook": "prerouting",
-                        "prio": -100,
-                        "policy": "accept"
-                    }
-                    },
-                {
-                    "rule": {
-                        "family": "ip",
-                        "table": "nat",
-                        "chain": "postrouting",
-                        "handle": 14,
-                        "expr": [
-                            {
-                                "match": {
-                                    "op": "==",
-                                    "left": {
-                                        "meta": {
-                                            "key": "oif"
-                                        }
-                                    },
-                                    "right": "eth0"
+                    "add": {
+                        "rule": {
+                            "family": "ip",
+                            "table": "nat",
+                            "chain": "PREROUTING",
+                            "expr": [
+                                {
+                                    "match": {
+                                        "op": "==",
+                                        "left": {
+                                            "payload": {
+                                                "protocol": "ip",
+                                                "field": "daddr"
+                                            }
+                                        },
+                                        "right": host_ip
                                     }
                                 },
-                            {
-                                "match": {
-                                    "op": "==",
-                                    "left": {
-                                        "payload": {
-                                            "protocol": "ip",
-                                            "field": "saddr"
-                                        }
-                                    },
-                                    "right": {
-                                        "prefix": {
-                                            "addr": dest_ip,
-                                            "len": 32
-                                        }
-                                    }
+                                {
+                                    "match": {
+                                        "op": "==",
+                                        "left": {
+                                            "payload": {
+                                                "protocol": protocol,
+                                                "field": "dport"
+                                            }
+                                        },
+                                        "right": host_port
                                     }
                                 },
-                            {
-                                "masquerade": None
+                                {
+                                    "dnat": {
+                                        "addr": dest_ip,
+                                        "port": dest_port
+                                    }
                                 }
-                        ]
+                            ]
+                        }
                     }
-                    },
+                },
                 {
-                    "rule": {
-                        "family": "ip",
-                        "table": "nat",
-                        "chain": "prerouting",
-                        "handle": 13,
-                        "expr": [
-                            {
-                                "match": {
-                                    "op": "==",
-                                    "left": {
-                                        "payload": {
-                                            "protocol": "ip",
-                                            "field": "daddr"
+                    "add": {
+                        "rule": {
+                            "family": "ip",
+                            "table": "nat",
+                            "chain": "POSTROUTING",
+                            "expr": [
+                                {
+                                    "match": {
+                                        "op": "==",
+                                        "left": {
+                                            "payload": {
+                                                "protocol": "ip",
+                                                "field": "saddr"
+                                            }
+                                        },
+                                        "right": {
+                                            "prefix": {
+                                                "addr": dest_ip,
+                                                "len": 32
+                                            }
                                         }
-                                    },
-                                    "right": host_ip
                                     }
                                 },
-                            {
-                                "match": {
-                                    "op": "==",
-                                    "left": {
-                                        "payload": {
-                                            "protocol": protocol,
-                                            "field": "dport"
-                                        }
-                                    },
-                                    "right": host_port
-                                    }
-                                },
-                            {
-                                "dnat": {
-                                    "addr": dest_ip,
-                                    "port": dest_port
+                                {
+                                    "masquerade": None
                                 }
-                            }
-                        ]
+                            ]
+                        }
                     }
                 }
             ]
         }
 
-        self._nft.json_cmd(rules)
-        if self._config.verbose:
-            self.logger.info("Added nftables port forwarding rule")
+        try:
+            for rule in rules["nftables"]:
+                rc, output, error = self._nft.json_cmd({"nftables": [rule]})
+                if rc != 0 and "File exists" not in str(error):
+                    raise NetworkError(f"Failed to add port forwarding rule: {error}")
+
+            if self._config.verbose:
+                self.logger.info(f"Added port forwarding rule: {host_ip}:{host_port} -> {dest_ip}:{dest_port}")
+
+        except Exception as e:
+            raise NetworkError(f"Failed to add port forwarding rules: {str(e)}")
 
     def delete_rule(self, rule):
         """Delete a single nftables rule.
@@ -725,7 +679,7 @@ class NetworkManager:
         try:
             if 'prerouting' in rules:
                 handle = rules['prerouting']
-                cmd = f'delete rule nat prerouting handle {handle}'
+                cmd = f'delete rule nat PREROUTING handle {handle}'
                 rc, output, error = self._nft.cmd(cmd)
 
                 if self._config.verbose:
@@ -736,8 +690,8 @@ class NetworkManager:
 
             if 'postrouting' in rules:
                 handle = rules['postrouting']
-                chain = 'POSTROUTING' if rules.get('postrouting_chain') == 'POSTROUTING' else 'postrouting'
-                cmd = f'delete rule nat {chain} handle {handle}'
+                # Always use uppercase POSTROUTING as that's the standard in nftables
+                cmd = f'delete rule nat POSTROUTING handle {handle}'
                 rc, output, error = self._nft.cmd(cmd)
 
                 if self._config.verbose:
