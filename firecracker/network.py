@@ -1,8 +1,9 @@
 import sys
 import ipaddress
 from pyroute2 import IPRoute
+from firecracker import utils
 from firecracker.logger import Logger
-from firecracker.utils import run
+from firecracker.utils import run, get_public_ip
 from firecracker.config import MicroVMConfig
 from firecracker.exceptions import NetworkError, ConfigurationError
 from ipaddress import IPv4Address, IPv4Network, AddressValueError
@@ -62,8 +63,6 @@ class NetworkManager:
                 if process.returncode == 0 and process.stdout.strip():
                     ip = process.stdout.strip()
                     if self._config.verbose:
-                        ip_parts = ip.split(" ")
-                        ip = ip_parts[0] if len(ip_parts) > 1 else ip
                         self.logger.info(f"Host IP address: {ip}")
                     return ip
             except Exception as e:
@@ -496,13 +495,13 @@ class NetworkManager:
             NetworkError: If retrieving nftables rules fails.
         """
         list_cmd = {"nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]}
-        
+
         # Alternative direct command approach
         try:
             from subprocess import run as subprocess_run
             import shutil
             import json
-            
+
             # Find the full path to the nft binary
             nft_path = shutil.which("nft")
             if not nft_path:
@@ -510,37 +509,41 @@ class NetworkManager:
                 if not os.path.exists(nft_path):
                     nft_path = "/usr/sbin/nft"  # Alternative path
                     if not os.path.exists(nft_path):
-                        raise NetworkError("Could not find nft executable in PATH or standard locations")
-            
+                        raise NetworkError(
+                            "Could not find nft executable in PATH or standard locations"
+                        )
+
             # Use the direct command approach with JSON output
             cmd = f"{nft_path} -j list table nat"
             result = subprocess_run(cmd, shell=True, capture_output=True, text=True)
-            
+
             if result.returncode != 0:
                 if "No such file or directory" in result.stderr:
                     return {}  # Table doesn't exist
                 raise NetworkError(f"Failed to get nftables rules: {result.stderr}")
-                
+
             try:
                 output = json.loads(result.stdout)
                 rules = {}
-                
+
                 # Process the rules from JSON output
                 for item in output.get("nftables", []):
                     if "rule" not in item:
                         continue
-                        
+
                     rule = item["rule"]
-                    chain = rule.get("chain", "").lower()  # Normalize chain name to lowercase
-                    
+                    chain = rule.get(
+                        "chain", ""
+                    ).lower()  # Normalize chain name to lowercase
+
                     # Check for prerouting rules (for incoming traffic)
                     if rule.get("table") == "nat" and chain == "prerouting":
                         expr = rule.get("expr", [])
-                        
+
                         has_daddr_match = False
                         has_dport_match = False
                         has_correct_dnat = False
-                        
+
                         for e in expr:
                             if (
                                 "match" in e
@@ -550,7 +553,7 @@ class NetworkManager:
                                 and e["match"]["right"] == host_ip
                             ):
                                 has_daddr_match = True
-                                
+
                             if (
                                 "match" in e
                                 and e["match"]["op"] == "=="
@@ -559,25 +562,27 @@ class NetworkManager:
                                 and e["match"]["right"] == host_port
                             ):
                                 has_dport_match = True
-                                
+
                             if (
                                 "dnat" in e
                                 and e["dnat"]["addr"] == dest_ip
                                 and e["dnat"]["port"] == dest_port
                             ):
                                 has_correct_dnat = True
-                                
+
                         if has_daddr_match and has_dport_match and has_correct_dnat:
                             if self._config.verbose:
-                                self.logger.info(f"Found prerouting rule with handle {rule['handle']}")
+                                self.logger.info(
+                                    f"Found prerouting rule with handle {rule['handle']}"
+                                )
                             rules["prerouting"] = rule["handle"]
-                            
+
                     # Check for postrouting rules (for outgoing traffic)
                     elif rule.get("table") == "nat" and chain == "postrouting":
                         expr = rule.get("expr", [])
                         has_saddr_match = False
                         has_masquerade = False
-                        
+
                         for e in expr:
                             # Check for source address match (VM's IP)
                             if (
@@ -592,26 +597,28 @@ class NetworkManager:
                                     and e["match"]["right"]["prefix"]["addr"] == dest_ip
                                 ):
                                     has_saddr_match = True
-                                    
+
                             if "masquerade" in e:
                                 has_masquerade = True
-                                
+
                         if has_saddr_match and has_masquerade:
                             if self._config.verbose:
-                                self.logger.info(f"Found postrouting rule with handle {rule['handle']}")
+                                self.logger.info(
+                                    f"Found postrouting rule with handle {rule['handle']}"
+                                )
                             rules["postrouting"] = rule["handle"]
-                            
+
                 return rules
-                
+
             except json.JSONDecodeError:
                 if self._config.verbose:
                     self.logger.warn("Failed to parse JSON output from nft command")
                 return {}
-                
+
         except Exception as e:
             if self._config.verbose:
                 self.logger.warn(f"Error using direct command approach: {str(e)}")
-            
+
             # Fall back to the original implementation
             try:
                 output = self._nft.json_cmd(list_cmd)
@@ -623,7 +630,9 @@ class NetworkManager:
                         continue
 
                     rule = item["rule"]
-                    chain = rule.get("chain", "").lower()  # Normalize chain name to lowercase
+                    chain = rule.get(
+                        "chain", ""
+                    ).lower()  # Normalize chain name to lowercase
 
                     # Check for prerouting rules (for incoming traffic)
                     if (
@@ -746,11 +755,13 @@ class NetworkManager:
         try:
             # Validate IP addresses first
             import ipaddress
+
             try:
                 ipaddress.ip_address(host_ip)
                 ipaddress.ip_address(dest_ip)
             except ValueError as e:
-                raise NetworkError(f"Invalid IP address: {str(e)}")
+                self.logger.error(f"Invalid IP address: {str(e)}")
+                host_ip = utils.get_public_ip()
 
             # First check if the rules already exist
             existing_rules = self.get_port_forward_handles(
@@ -764,7 +775,7 @@ class NetworkManager:
             # Use direct command execution with proper syntax
             from subprocess import run as subprocess_run
             import shutil
-            
+
             # Find the full path to the nft binary
             nft_path = shutil.which("nft")
             if not nft_path:
@@ -772,24 +783,26 @@ class NetworkManager:
                 if not os.path.exists(nft_path):
                     nft_path = "/usr/sbin/nft"  # Alternative path
                     if not os.path.exists(nft_path):
-                        raise NetworkError("Could not find nft executable in PATH or standard locations")
-            
+                        raise NetworkError(
+                            "Could not find nft executable in PATH or standard locations"
+                        )
+
             # Create commands using NAT table
             commands = [
                 f"{nft_path} add table nat",
                 f"{nft_path} 'add chain nat postrouting {{ type nat hook postrouting priority 100 ; }}'",
                 f"{nft_path} 'add chain nat prerouting {{ type nat hook prerouting priority -100; }}'",
                 f"{nft_path} 'add rule nat prerouting ip daddr {host_ip} {protocol} dport {host_port} counter dnat to {dest_ip}:{dest_port}'",
-                f"{nft_path} 'add rule nat postrouting ip saddr {dest_ip} counter masquerade'"
+                f"{nft_path} 'add rule nat postrouting ip saddr {dest_ip} counter masquerade'",
             ]
-            
+
             # Execute each command separately
             for cmd in commands:
                 if self._config.verbose:
                     self.logger.debug(f"Running nftables command: {cmd}")
-                    
+
                 result = subprocess_run(cmd, shell=True, capture_output=True, text=True)
-                
+
                 if result.returncode != 0 and "File exists" not in result.stderr:
                     if self._config.verbose:
                         self.logger.error(
@@ -875,7 +888,7 @@ class NetworkManager:
             rules = self.get_port_forward_handles(
                 host_ip, host_port, dest_ip, dest_port
             )
-            
+
             # If there are no rules to delete, just return
             if not rules:
                 if self._config.verbose:
@@ -885,7 +898,7 @@ class NetworkManager:
             # Use direct command execution with proper syntax
             from subprocess import run as subprocess_run
             import shutil
-            
+
             # Find the full path to the nft binary
             nft_path = shutil.which("nft")
             if not nft_path:
@@ -893,19 +906,23 @@ class NetworkManager:
                 if not os.path.exists(nft_path):
                     nft_path = "/usr/sbin/nft"  # Alternative path
                     if not os.path.exists(nft_path):
-                        raise NetworkError("Could not find nft executable in PATH or standard locations")
-            
+                        raise NetworkError(
+                            "Could not find nft executable in PATH or standard locations"
+                        )
+
             # If we have handles, delete those specific rules
             if rules:
                 for rule_type, handle in rules.items():
                     chain = "prerouting" if rule_type == "prerouting" else "postrouting"
                     cmd = f"{nft_path} 'delete rule nat {chain} handle {handle}'"
-                    
+
                     if self._config.verbose:
                         self.logger.debug(f"Running nftables command: {cmd}")
-                    
-                    result = subprocess_run(cmd, shell=True, capture_output=True, text=True)
-                    
+
+                    result = subprocess_run(
+                        cmd, shell=True, capture_output=True, text=True
+                    )
+
                     if result.returncode != 0:
                         if self._config.verbose:
                             self.logger.error(
@@ -921,9 +938,9 @@ class NetworkManager:
                 # Direct command to delete the rule by matching its properties
                 commands = [
                     f"{nft_path} 'delete rule nat prerouting ip daddr {host_ip} tcp dport {host_port} counter dnat to {dest_ip}:{dest_port}'",
-                    f"{nft_path} 'delete rule nat postrouting ip saddr {dest_ip} counter masquerade'"
+                    f"{nft_path} 'delete rule nat postrouting ip saddr {dest_ip} counter masquerade'",
                 ]
-                
+
                 for cmd in commands:
                     subprocess_run(cmd, shell=True, capture_output=True, text=True)
                     # We don't check for errors here as these may fail if rules don't exist
