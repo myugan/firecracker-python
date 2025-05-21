@@ -62,6 +62,8 @@ class NetworkManager:
                 if process.returncode == 0 and process.stdout.strip():
                     ip = process.stdout.strip()
                     if self._config.verbose:
+                        ip_parts = ip.split(" ")
+                        ip = ip_parts[0] if len(ip_parts) > 1 else ip
                         self.logger.info(f"Host IP address: {ip}")
                     return ip
             except Exception as e:
