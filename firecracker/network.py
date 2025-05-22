@@ -62,6 +62,9 @@ class NetworkManager:
                 process = run(cmd)
                 if process.returncode == 0 and process.stdout.strip():
                     ip = process.stdout.strip()
+                    # Handle both single IP and multiple IPs separated by newlines
+                    ip = self._clean_ip_address(ip)
+
                     if self._config.verbose:
                         self.logger.info(f"Host IP address: {ip}")
                     return ip
@@ -112,6 +115,25 @@ class NetworkManager:
             if self._config.verbose:
                 self.logger.error(f"Failed to determine host IP: {str(e)}")
             raise NetworkError(f"Failed to determine host IP address: {str(e)}")
+
+    def _clean_ip_address(self, ip_str: str) -> str:
+        """Clean an IP address string by removing newlines and extra whitespace.
+
+        Args:
+            ip_str (str): The IP address string to clean
+
+        Returns:
+            str: The cleaned IP address
+        """
+        if not ip_str:
+            return ip_str
+
+        # If multiple IPs are present (separated by newlines), take the first one
+        if "\n" in ip_str:
+            ip_str = ip_str.split("\n")[0]
+
+        # Remove any remaining whitespace
+        return ip_str.strip()
 
     def get_interface_name(self) -> str:
         """Get the name of the network interface.
