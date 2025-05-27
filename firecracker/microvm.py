@@ -46,6 +46,10 @@ class MicroVM:
         expose_ports: bool = None,
         host_port: int = None,
         dest_port: int = None,
+        # Cloud-init user data as a string.
+        user_data: str = None,
+        # Path to a file containing cloud-init user data.
+        user_data_file: str = None,
         verbose: bool = False,
     ) -> None:
         """Initialize a new MicroVM instance with configuration.
@@ -67,6 +71,8 @@ class MicroVM:
             expose_ports (bool, optional): Whether to expose ports
             host_port (int, optional): Host port for port forwarding
             dest_port (int, optional): Destination port for port forwarding
+            user_data (str, optional): Cloud-init user data as a string.
+            user_data_file (str, optional): Path to file with cloud-init user data.
             verbose (bool, optional): Whether to enable verbose logging
         """
         # Generate IDs and Names
@@ -83,6 +89,29 @@ class MicroVM:
             self._config.mmds_enabled if mmds_enabled is None else mmds_enabled
         )
         self._mmds_ip = self._config.mmds_ip if mmds_ip is None else mmds_ip
+
+        # Handle user_data and user_data_file
+        self._cloud_init_user_data = None
+        if user_data_file:
+            if not os.path.exists(user_data_file):
+                raise ConfigurationError(
+                    f"User data file not found: {user_data_file}"
+                )
+            try:
+                with open(user_data_file, 'r') as f:
+                    self._cloud_init_user_data = f.read()
+            except Exception as e:
+                raise ConfigurationError(
+                    f"Error reading user data file {user_data_file}: {e}"
+                )
+        elif user_data:
+            self._cloud_init_user_data = user_data
+        
+        if self._cloud_init_user_data:
+            self._mmds_enabled = True
+            if not self._mmds_ip:
+                self._mmds_ip = self._config.mmds_ip # Use default if not set
+
         self._user_data = {"meta-data": {"instance-id": self._microvm_id}}
         self._labels = labels if labels is not None else {}
         self._working_dir = working_dir
@@ -884,12 +913,12 @@ class MicroVM:
 
             if self._config.verbose:
                 self._logger.debug(
-                    f"MMDS network configuration response: {mmds_response}"
+                    f"MMDS network config response: {mmds_response}"
                 )
                 self._logger.info("Setting MMDS data...")
 
-            # Prepare user data
-            user_data = {
+            # Prepare mmds payload
+            mmds_payload = {
                 "latest": {
                     "meta-data": {
                         "instance-id": self._microvm_id,
@@ -898,11 +927,17 @@ class MicroVM:
                 }
             }
 
-            # Add user data if provided
-            if self._config.user_data:
-                user_data["latest"]["user-data"] = self._config.user_data
+            # Add user data to payload if present
+            if self._cloud_init_user_data:
+                mmds_payload["latest"]["user-data"] = self._cloud_init_user_data
+            elif self._config.user_data and not self._cloud_init_user_data:
+                # Fallback to config.user_data if not set by constructor params
+                mmds_payload["latest"]["user-data"] = self._config.user_data
 
-            mmds_data_response = self._api.mmds.put(**user_data)
+            if self._config.verbose and "user-data" in mmds_payload["latest"]:
+                self._logger.info("Cloud-init user data applied via MMDS.")
+
+            mmds_data_response = self._api.mmds.put(**mmds_payload)
 
             if self._config.verbose:
                 self._logger.debug(f"MMDS data response: {mmds_data_response}")

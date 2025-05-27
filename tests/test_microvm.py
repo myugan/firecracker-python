@@ -590,3 +590,53 @@ def test_vmm_delete_with_tap_device_cleanup():
 
     result = vm.delete()
     assert f"VMM {id} deleted successfully" in result, f"VM deletion failed: {result}"
+
+
+def test_cloud_init_user_data_file():
+    """Test MicroVM initialization with user_data_file."""
+    sample_user_data_content = "#cloud-config\npackages:\n  - vim"
+    # Use a path relative to the test file or a dedicated temp dir for tests
+    # For simplicity, using /tmp here, but ideally use pytest tmp_path fixture
+    user_data_filename = "/tmp/test-user-data.yaml"
+
+    with open(user_data_filename, "w") as f:
+        f.write(sample_user_data_content)
+
+    try:
+        vm = MicroVM(
+            name="test-cloud-init-file",
+            user_data_file=user_data_filename
+        )
+        assert vm._cloud_init_user_data == sample_user_data_content,
+               "_cloud_init_user_data not set correctly from file"
+        assert vm._mmds_enabled is True, \
+               "MMDS should be enabled when user_data_file is provided"
+        assert vm._mmds_ip is not None, \
+               "MMDS IP should be set when user_data_file is provided"
+
+    finally:
+        if os.path.exists(user_data_filename):
+            os.remove(user_data_filename)
+
+def test_cloud_init_user_data_string():
+    """Test MicroVM initialization with user_data string."""
+    sample_user_data_content = "#cloud-config\npackages:\n  - htop"
+    vm = MicroVM(
+        name="test-cloud-init-string",
+        user_data=sample_user_data_content
+    )
+    assert vm._cloud_init_user_data == sample_user_data_content, \
+           "_cloud_init_user_data not set correctly from string"
+    assert vm._mmds_enabled is True, \
+           "MMDS should be enabled when user_data is provided"
+    assert vm._mmds_ip is not None, \
+           "MMDS IP should be set when user_data is provided"
+
+def test_cloud_init_user_data_file_not_found():
+    """Test MicroVM initialization with a non-existent user_data_file."""
+    from firecracker.exceptions import ConfigurationError
+    with pytest.raises(ConfigurationError, match=r"User data file not found:"):
+        MicroVM(
+            name="test-cloud-init-file-not-found",
+            user_data_file="/tmp/non_existent_user_data.yaml"
+        )

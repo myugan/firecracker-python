@@ -13,7 +13,7 @@ MicroVM(name=None, kernel_file=None, base_rootfs=None, rootfs_url=None,
         vcpu=None, mem_size_mib=None, ip_addr=None, bridge=None, 
         bridge_name=None, mmds_enabled=None, mmds_ip=None, labels=None, 
         working_dir='/root', expose_ports=None, host_port=None, 
-        dest_port=None, verbose=False)
+        dest_port=None, user_data=None, user_data_file=None, verbose=False)
 ```
 
 #### Parameters
@@ -34,6 +34,8 @@ MicroVM(name=None, kernel_file=None, base_rootfs=None, rootfs_url=None,
 - `expose_ports` (bool, optional): Whether to expose ports. Defaults to configuration setting.
 - `host_port` (int, optional): Host port for port forwarding.
 - `dest_port` (int, optional): Destination port for port forwarding.
+- `user_data` (str, optional): Cloud-init user data as a string. This will enable MMDS.
+- `user_data_file` (str, optional): Path to a file containing cloud-init user data. This will enable MMDS.
 - `verbose` (bool, optional): Enable verbose logging. Defaults to `False`.
 
 ### Static Methods

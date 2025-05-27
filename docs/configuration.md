@@ -33,7 +33,7 @@ The `MicroVMConfig` class is a dataclass that defines default configuration valu
 | `host_port` | int | None | Default host port for port forwarding |
 | `dest_port` | int | None | Default destination port for port forwarding |
 | `nat_enabled` | bool | False | Whether to enable NAT by default |
-| `user_data` | str | None | Cloud-init user data |
+| `user_data` | str | None | Cloud-init user data (string or file path) |
 
 ## Using Custom Configuration
 
@@ -48,7 +48,8 @@ vm = MicroVM(
     mem_size_mib=1024,
     ip_addr="192.168.100.2",
     bridge=True,
-    bridge_name="br0"
+    bridge_name="br0",
+    user_data_file="/path/to/my-cloud-init.yaml"  # Example for user_data
 )
 
 vm.create()
@@ -104,13 +105,14 @@ from firecracker import MicroVM
 
 vm = MicroVM(
     mmds_enabled=True,
-    mmds_ip="169.254.169.254"
+    mmds_ip="169.254.169.254",
+    user_data="#cloud-config\nruncmd:\n  - echo Hello World > /tmp/hello.txt" # Example for user_data
 )
 
 vm.create()
 
-# Add data to MMDS
-vm._api.mmds.put(json_data={"instance-id": "i-abcdef123456"})
+# Add data to MMDS (Note: user_data is now handled by MicroVM constructor)
+# vm._api.mmds.put(json_data={"instance-id": "i-abcdef123456"})
 ```
 
 ## Advanced Configuration
@@ -179,4 +181,4 @@ For optimal performance, ensure your host system meets these requirements:
 
 3. **Security**: Use minimal permissions and restrict network access to enhance security.
 
-4. **Monitoring**: Implement monitoring to track resource usage and performance of your microVMs. 
+4. **Monitoring**: Implement monitoring to track resource usage and performance of your microVMs.

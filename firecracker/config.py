@@ -24,4 +24,4 @@ class MicroVMConfig:
     host_port: int = None
     dest_port: int = None
     nat_enabled: bool = True
-    user_data: str = None  # Cloud-init user data
+    user_data: str = None  # Cloud-init user data (string or file path)
