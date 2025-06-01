@@ -377,9 +377,9 @@ class VMMManager:
             ids = [vmm['id'] for vmm in vmm_list]
 
         for id in ids:
-            self.cleanup_resources(id)
+            self.cleanup(id)
 
-    def cleanup_resources(self, id=None):
+    def cleanup(self, id=None):
         """Clean up network and process resources for a VMM."""
         try:
             if self._config.verbose:
