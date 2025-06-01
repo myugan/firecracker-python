@@ -16,9 +16,10 @@ class ProcessManager:
 
     FLUSH_CMD = "screen -S {session} -X colon 'logfile flush 0^M'"
 
-    def __init__(self, verbose: bool = False):
-        self.logger = Logger(level="INFO", verbose=verbose)
-        self.config = MicroVMConfig()
+    def __init__(self, verbose: bool = False, level: str = "INFO"):
+        self._logger = Logger(level=level, verbose=verbose)
+        self._config = MicroVMConfig()
+        self._config.verbose = verbose
 
     def start_screen_process(self, screen_log: str, session_name: str,
                            binary_path: str, binary_params: list) -> str:
@@ -44,30 +45,19 @@ class ProcessManager:
                 params=" ".join(binary_params)
             )
 
-            if self.logger.verbose:
-                self.logger.debug(f"Starting screen session: {start_cmd}")
-
             run(start_cmd)
 
-            screen_pid = None
-            for attempt in Retrying(
-                stop=stop_after_attempt(5),
-                wait=wait_fixed(1),
-                retry_error_cls=ProcessError
-            ):
-                with attempt:
-                    result = run(
-                        f"screen -ls | grep {session_name} | head -1 | awk '{{print $1}}' | cut -d. -f1"
-                    )
-                    screen_pid = result.stdout.strip()
-                    if self.logger.verbose:
-                        self.logger.info(f"Firecracker is running with PID: {screen_pid}")
+            get_screen_pid = run(
+                f"screen -ls | grep {session_name} | head -1 | awk '{{print $1}}' | cut -d. -f1"
+            )
+            screen_pid = get_screen_pid.stdout.strip()
+            if not screen_pid:
+                raise ProcessError("Firecracker is not running")
 
-                    if not screen_pid:
-                        raise ProcessError("Firecracker is not running")
+            self._logger.info(f"Firecracker is running with PID: {screen_pid}")
 
-                    screen_ps = psutil.Process(int(screen_pid))
-                    self.wait_process_running(screen_ps)
+            screen_ps = psutil.Process(int(screen_pid))
+            self.wait_process_running(screen_ps)
 
             try:
                 run(self.FLUSH_CMD.format(session=session_name))
@@ -79,8 +69,8 @@ class ProcessManager:
         except Exception:
             try:
                 if screen_pid:
-                    if self.logger.verbose:
-                        self.logger.info(f"Killing screen session {screen_pid}")
+                    if self._logger.verbose:
+                        self._logger.info(f"Killing screen session {screen_pid}")
                     safe_kill(int(screen_pid))
             except Exception as cleanup_error:
                 raise ProcessError(f"Cleanup after failure error: {str(cleanup_error)}") from cleanup_error
@@ -105,19 +95,19 @@ class ProcessManager:
                     for pid in screen_pid_output.splitlines():
                         try:
                             pid_int = int(pid.strip())
-                            if self.logger.verbose:
-                                self.logger.info(f"Killing screen session {pid_int}")
+                            if self._logger.verbose:
+                                self._logger.info(f"Killing screen session {pid_int}")
                             safe_kill(pid_int, signal.SIGKILL)
                             time.sleep(0.5)  # Ensure the process is terminated
                         except (ProcessLookupError, ValueError) as e:
-                            self.logger.warn(f"Failed to kill process {pid}: {str(e)}")
+                            self._logger.warn(f"Failed to kill process {pid}: {str(e)}")
 
                     return screen_pid_output.splitlines()[0] if screen_pid_output.splitlines() else None
 
             return None
 
         except Exception as e:
-            self.logger.error(f"Failed to cleanup screen session: {str(e)}")
+            self._logger.error(f"Failed to cleanup screen session: {str(e)}")
             raise ProcessError(f"Failed to cleanup screen session: {str(e)}")
 
     @staticmethod
@@ -139,8 +129,6 @@ class ProcessManager:
             if screen_process.returncode == 0:
                 screen_output = screen_process.stdout.strip()
                 if "Dead" in screen_output:
-                    if self.logger.verbose:
-                        self.logger.info(f"Process VMM {id} is dead")
                     return False
 
                 match = re.search(r'\d+', screen_output)
@@ -148,8 +136,6 @@ class ProcessManager:
                     screen_pid = match.group(0)
                     if screen_pid:
                         process = psutil.Process(int(screen_pid))
-                        if self.logger.verbose:
-                            self.logger.info(f"Process VMM {id} is running with PID: {screen_pid}")
                         return process.is_running()
             return False
 

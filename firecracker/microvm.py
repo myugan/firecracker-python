@@ -26,7 +26,7 @@ class MicroVM:
     Args:
         id (str, optional): ID for the MicroVM
     """
-    def __init__(self, name: str = None, kernel_file: str = None, base_rootfs: str = None, rootfs_url: str = None, vcpu: int = None, mem_size_mib: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None, mmds_enabled: bool = None, mmds_ip: str = None, labels: dict = None, working_dir: str = '/root', expose_ports: bool = None, host_port: int = None, dest_port: int = None, verbose: bool = False) -> None:
+    def __init__(self, name: str = None, kernel_file: str = None, base_rootfs: str = None, rootfs_url: str = None, vcpu: int = None, mem_size_mib: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None, mmds_enabled: bool = None, mmds_ip: str = None, labels: dict = None, working_dir: str = '/root', expose_ports: bool = False, host_port: int = None, dest_port: int = None, verbose: bool = False, level: str = "INFO") -> None:
         """Initialize a new MicroVM instance with configuration.
 
         Args:
@@ -43,10 +43,8 @@ class MicroVM:
             mmds_ip (str, optional): IP address for MMDS
             labels (dict, optional): Labels for the MicroVM
             working_dir (str, optional): Working directory for the MicroVM
-            expose_ports (bool, optional): Whether to expose ports
-            host_port (int, optional): Host port for port forwarding
-            dest_port (int, optional): Destination port for port forwarding
-            verbose (bool, optional): Whether to enable verbose logging
+            verbose (bool, optional): Enable verbose logging
+            level (str, optional): Log level (DEBUG, INFO, WARN, ERROR). Defaults to INFO
         """
         # Generate IDs and Names
         self._microvm_id = generate_id()
@@ -58,14 +56,16 @@ class MicroVM:
         self._mem_size_mib = self._config.mem_size_mib if mem_size_mib is None else mem_size_mib
         self._mmds_enabled = self._config.mmds_enabled if mmds_enabled is None else mmds_enabled
         self._mmds_ip = self._config.mmds_ip if mmds_ip is None else mmds_ip
-        self._user_data = {"meta-data": {"instance-id": self._microvm_id}}
+
         self._labels = labels if labels is not None else {}
         self._working_dir = working_dir
 
-        self._logger = Logger(level="INFO", verbose=verbose)
-        self._network = NetworkManager(verbose=verbose)
-        self._process = ProcessManager(verbose=verbose)
-        self._vmm = VMMManager(verbose=verbose)
+        self._config.verbose = verbose
+        self._logger = Logger(level=level, verbose=verbose)
+        self._logger.set_level(level)
+        self._network = NetworkManager(verbose=verbose, level=level)
+        self._process = ProcessManager(verbose=verbose, level=level)
+        self._vmm = VMMManager(verbose=verbose, level=level)
 
         self._socket_file = f"{self._config.data_path}/{self._microvm_id}/firecracker.socket"
         self._api = self._vmm.get_api(self._microvm_id)
@@ -89,8 +89,8 @@ class MicroVM:
         self._bridge_name = self._config.bridge_name if bridge_name is None else bridge_name
 
         self._ssh_client = SSHClient()
-        self._expose_ports = self._config.expose_ports if expose_ports is None else expose_ports
-        
+        self._expose_ports = expose_ports
+        self._host_ip = get_public_ip()
         self._host_port = self._parse_ports(host_port)
         self._dest_port = self._parse_ports(dest_port)
 
@@ -181,22 +181,20 @@ class MicroVM:
                 return f"VMM {id} is paused"
 
     def create(self) -> dict:
-        """Create a new VMM and configure it."""
-        vmm_list = self._vmm.list_vmm()
-
-        if self._microvm_name in [vmm['name'] for vmm in vmm_list]:
-            return f"VMM with name {self._microvm_name} already exists"
+        vmm_dir = f"{self._config.data_path}/{self._microvm_id}"
+        if os.path.exists(vmm_dir):
+            return f"VMM with ID {self._microvm_id} already exists"
 
         try:
-            self._run_firecracker()
-            if not self._basic_config():
-                return "Failed to configure VMM"
-
             if self._vmm.check_network_overlap(self._ip_addr):
                 return f"IP address {self._ip_addr} is already in use"
 
-            if self._config.verbose:
-                self._logger.info(f"Creating VMM {self._microvm_name}")
+            if self._network.detect_cidr_conflict(self._gateway_ip, 24):
+                return f"CIDR conflict detected with {self._gateway_ip}"
+
+            self._run_firecracker()
+            if not self._basic_config():
+                return "Failed to configure VMM"
 
             if self._config.verbose:
                 self._logger.info("VMM configuration completed")
@@ -204,45 +202,32 @@ class MicroVM:
             self._api.actions.put(action_type="InstanceStart")
 
             if self._config.verbose:
-                self._logger.info("VMM started successfully")
+                self._logger.info(f"VMM ID: {self._microvm_id} is started successfully")
 
             if self._expose_ports:
-                if self._config.verbose:
-                    self._logger.info("Port forwarding is enabled")
-                    self._logger.info(f"Host ports: {self._host_port}")
-                    self._logger.info(f"Destination ports: {self._dest_port}")
-
                 if not self._host_port or not self._dest_port:
-                    if self._config.verbose:
-                        self._logger.warn("Port forwarding requested but no ports specified")
-                else:
-                    try:
-                        if self._config.verbose:
-                            self._logger.info("Attempting to configure port forwarding...")
-                        self.port_forward(host_port=self._host_port, dest_port=self._dest_port)
-                        if self._config.verbose:
-                            self._logger.info("Port forwarding configured successfully")
-                    except Exception as e:
-                        if self._config.verbose:
-                            self._logger.error(f"Failed to configure port forwarding: {str(e)}")
+                    raise ValueError("Port forwarding requested but no ports specified. Both host_port and dest_port must be set.")
+
+                host_ports = [self._host_port] if isinstance(self._host_port, int) else self._host_port
+                dest_ports = [self._dest_port] if isinstance(self._dest_port, int) else self._dest_port
+
+                if len(host_ports) != len(dest_ports):
+                    raise ValueError("Number of host ports must match number of destination ports")
+
+                for host_port, dest_port in zip(host_ports, dest_ports):
+                    self._network.add_port_forward(self._microvm_id, self._host_ip, host_port, self._ip_addr, dest_port)
 
                 ports = {}
-                port_pairs = zip(self._host_port, self._dest_port)
-                if self._config.verbose:
-                    self._logger.info(f"Port pairs: {list(port_pairs)}")
-                
-                for host_port, dest_port in zip(self._host_port, self._dest_port):
+                for host_port, dest_port in zip(host_ports, dest_ports):
                     port_key = f"{dest_port}/tcp"
                     if port_key not in ports:
                         ports[port_key] = []
-                        
+
                     ports[port_key].append({
                         "HostPort": host_port,
                         "DestPort": dest_port
                     })
             else:
-                if self._config.verbose:
-                    self._logger.info("Port forwarding is disabled")
                 ports = {}
 
             pid, create_time = self._process.get_pids(self._microvm_id)
@@ -344,30 +329,36 @@ class MicroVM:
             str: A status message indicating the result of the deletion operation.
 
         Raises:
-            FirecrackerError: If an error occurs during the deletion process.
+            VMMError: If an error occurs during the deletion process.
         """
         try:
-            id = id if id else self._microvm_id
-
-            if not id and not all:
-                return "No VMM ID specified for deletion"
-
             vmm_list = self._vmm.list_vmm()
             if not vmm_list:
                 return "No VMMs available to delete"
 
+            # Handle deletion of all VMMs
             if all:
                 for vmm in vmm_list:
+                    if self._config.verbose:
+                        self._logger.info(f"Deleting VMM with ID {vmm['id']}")
+                    self._network.delete_all_port_forward(vmm['id'])
                     self._vmm.delete_vmm(vmm['id'])
                 return "All VMMs deleted successfully"
 
-            if id not in [vmm['id'] for vmm in vmm_list]:
-                return f"VMM with ID {id} not found"
+            # Handle deletion of a specific VMM
+            target_id = id if id else self._microvm_id
+            if not target_id:
+                return "No VMM ID specified for deletion"
+
+            if target_id not in [vmm['id'] for vmm in vmm_list]:
+                return f"VMM with ID {target_id} not found"
 
             if self._config.verbose:
-                self._logger.info(f"Deleting VMM with ID {id}")
-            self._vmm.delete_vmm(id)
-            return f"VMM {id} deleted successfully"
+                self._logger.info(f"Deleting VMM with ID {target_id}")
+
+            self._network.delete_all_port_forward(target_id)
+            self._vmm.delete_vmm(target_id)
+            return f"VMM {target_id} deleted successfully"
 
         except Exception as e:
             self._logger.error(f"Error deleting VMM: {str(e)}")
@@ -520,7 +511,6 @@ class MicroVM:
             if not isinstance(host_port, (int, list)) or not isinstance(dest_port, (int, list)):
                 raise ValueError("Ports must be integers or lists of integers")
 
-            # Convert single ports to lists for consistent handling
             host_ports = [host_port] if isinstance(host_port, int) else host_port
             dest_ports = [dest_port] if isinstance(dest_port, int) else dest_port
 
@@ -534,7 +524,7 @@ class MicroVM:
                     if self._config.verbose:
                         self._logger.info(f"Removed port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}")
                 else:
-                    self._network.add_port_forward(host_ip, h_port, dest_ip, d_port)
+                    self._network.add_port_forward(id, host_ip, h_port, dest_ip, d_port)
                     if self._config.verbose:
                         self._logger.info(f"Added port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}")
 
@@ -751,14 +741,6 @@ class MicroVM:
                 host_dev_name=self._host_dev_name
             )
 
-            # Enable NAT internet access if configured
-            if self._config.nat_enabled:
-                self._network.enable_nat_internet_access(
-                    tap_name=self._host_dev_name,
-                    iface_name=self._iface_name,
-                    vm_ip=self._ip_addr
-                )
-
             if self._config.verbose:
                 self._logger.info("Network configuration complete")
 
@@ -777,34 +759,14 @@ class MicroVM:
             if not self._mmds_enabled:
                 return
 
-            mmds_response = self._api.mmds_config.put(
+            self._api.mmds_config.put(
                 version="V2",
                 ipv4_address=self._mmds_ip,
                 network_interfaces=[self._iface_name]
             )
 
             if self._config.verbose:
-                self._logger.debug(f"MMDS network configuration response: {mmds_response}")
-                self._logger.info("Setting MMDS data...")
-
-            # Prepare user data
-            user_data = {
-                "latest": {
-                    "meta-data": {
-                        "instance-id": self._microvm_id,
-                        "local-hostname": self._microvm_name
-                    }
-                }
-            }
-
-            # Add user data if provided
-            if self._config.user_data:
-                user_data["latest"]["user-data"] = self._config.user_data
-
-            mmds_data_response = self._api.mmds.put(**user_data)
-
-            if self._config.verbose:
-                self._logger.debug(f"MMDS data response: {mmds_data_response}")
+                self._logger.info("MMDS data configured")
 
         except Exception as e:
             raise ConfigurationError(f"Failed to configure MMDS: {str(e)}")
@@ -838,18 +800,13 @@ class MicroVM:
                 binary_params=binary_params
             )
 
-            max_retries = 3
-            for retry in range(max_retries):
-                if not psutil.pid_exists(int(screen_pid)):
-                    raise ProcessError("Firecracker process is not running")
+            if not psutil.pid_exists(int(screen_pid)):
+                raise ProcessError("Firecracker process is not running")
 
-                if os.path.exists(self._socket_file):
-                    return Api(self._socket_file)
+            if os.path.exists(self._socket_file):
+                return Api(self._socket_file)
 
-                if retry < max_retries - 1:
-                    time.sleep(0.5)
-
-            raise APIError(f"Failed to connect to the API socket after {max_retries} attempts")
+            raise APIError(f"Failed to connect to the API socket")
 
         except Exception as exc:
             self._vmm.cleanup_resources(self._microvm_id)
