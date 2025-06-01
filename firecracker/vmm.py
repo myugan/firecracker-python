@@ -24,8 +24,8 @@ class VMMManager:
         self._logger = Logger(level=level, verbose=verbose)
         self._config = MicroVMConfig()
         self._config.verbose = verbose
-        self._network = NetworkManager(verbose=verbose)
-        self._process = ProcessManager(verbose=verbose)
+        self._network = NetworkManager(verbose=verbose, level=level)
+        self._process = ProcessManager(verbose=verbose, level=level)
         self._api = None
 
     def get_api(self, id: str) -> Api:
@@ -77,14 +77,17 @@ class VMMManager:
         vmm_list = []
         running_pids = self._process.get_all_pids()
 
+        has_running_vmms = len(running_pids) > 0
+
         for vmm_id in os.listdir(self._config.data_path):
             vmm_path = os.path.join(self._config.data_path, vmm_id)
             if not os.path.isdir(vmm_path):
                 continue
-            config_path = os.path.join(vmm_path, 'config.json')
 
+            config_path = os.path.join(vmm_path, 'config.json')
             if not os.path.exists(config_path):
-                self._logger.info(f"Config file not found for VMM ID: {vmm_id}")
+                if has_running_vmms and self._config.verbose:
+                    self._logger.info(f"Config file not found for VMM ID: {vmm_id}")
                 continue
 
             with open(config_path, 'r') as config_file:
