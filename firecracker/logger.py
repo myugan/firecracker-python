@@ -6,7 +6,7 @@ class Logger:
     COLORS = {
         "INFO": "\033[0m",
         "ERROR": "\033[91m",
-        "WARN": "\033[93m",
+        "WARNING": "\033[93m",
         "DEBUG": "\033[94m",
     }
     RESET = "\033[0m"
@@ -22,7 +22,7 @@ class Logger:
         """Initialize the logger with custom configuration.
 
         Args:
-            level (str): Initial log level (INFO, ERROR, SUCCESS, WARN, DEBUG)
+            level (str): Initial log level (INFO, ERROR, WARN, DEBUG)
             verbose (bool): Enable verbose (DEBUG) logging
         """
         self.logger = logging.getLogger('microvm')
@@ -54,7 +54,7 @@ class Logger:
         """Set the logging level.
 
         Args:
-            level (str): Log level to set (INFO, ERROR, WARN, DEBUG)
+            level (str): Log level to set (INFO, ERROR, WARNING, DEBUG)
         """
         logging_level = self.LEVEL_MAP.get(level, logging.INFO)
         self.logger.setLevel(logging_level)
@@ -64,11 +64,15 @@ class Logger:
         """Log a message at the specified level.
 
         Args:
-            level (str): Level to log at (INFO, ERROR, WARN, DEBUG)
+            level (str): Level to log at (INFO, ERROR, WARNING, DEBUG)
             message (str): Message to log
         """
         if level not in self.LEVEL_MAP:
             level = "INFO"  # Default to INFO for unknown levels
+
+        # If not in verbose mode, only show ERROR and WARNING messages
+        if not self.verbose and level in ["DEBUG", "INFO"]:
+            return
 
         log_method = getattr(self.logger, level.lower())
         log_method(message)
