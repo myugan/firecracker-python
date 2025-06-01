@@ -341,7 +341,6 @@ class MicroVM:
                 for vmm in vmm_list:
                     if self._config.verbose:
                         self._logger.info(f"Deleting VMM with ID {vmm['id']}")
-                    self._network.delete_all_port_forward(vmm['id'])
                     self._vmm.delete_vmm(vmm['id'])
                 return "All VMMs deleted successfully"
 
@@ -356,7 +355,6 @@ class MicroVM:
             if self._config.verbose:
                 self._logger.info(f"Deleting VMM with ID {target_id}")
 
-            self._network.delete_all_port_forward(target_id)
             self._vmm.delete_vmm(target_id)
             return f"VMM {target_id} deleted successfully"
 
@@ -809,7 +807,7 @@ class MicroVM:
             raise APIError(f"Failed to connect to the API socket")
 
         except Exception as exc:
-            self._vmm.cleanup_resources(self._microvm_id)
+            self._vmm.cleanup(self._microvm_id)
             raise VMMError(str(exc))
 
     def _download_rootfs(self, url: str):
