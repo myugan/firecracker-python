@@ -31,11 +31,11 @@ except ImportError:
 class NetworkManager:
     """Manages network-related operations for Firecracker VMs."""
     def __init__(self, verbose: bool = False, level: str = "INFO"):
-        self.logger = Logger(level=level, verbose=verbose)
         self._config = MicroVMConfig()
         self._config.verbose = verbose
         self._nft = Nftables()
         self._nft.set_json_output(True)
+        self._logger = Logger(level=level, verbose=verbose)
 
     def get_interface_name(self) -> str:
         """Get the name of the network interface.
@@ -49,7 +49,7 @@ class NetworkManager:
         process = run("ip route | grep default | awk '{print $5}'")
         if process.returncode == 0:
             if self._config.verbose:
-                self.logger.info(f"Default interface name: {process.stdout.strip()}")
+                self._logger.info(f"Default interface name: {process.stdout.strip()}")
 
             return process.stdout.strip()
         else:
@@ -98,6 +98,8 @@ class NetworkManager:
             list: List of matching rules for the specified tap interface.
         """
         tap_rules = []
+        logged_tap_names = set()
+
         for item in rules:
             if 'rule' in item:
                 rule = item['rule']
@@ -105,12 +107,14 @@ class NetworkManager:
                     for expr in rule['expr']:
                         if 'match' in expr and 'right' in expr['match'] and isinstance(expr['match']['right'], str) and tap_name in expr['match']['right']:
                             if self._config.verbose:
-                                self.logger.info(f"Found matching rule for {tap_name}")
+                                if tap_name not in logged_tap_names:
+                                    self._logger.info(f"Found matching rule for {tap_name} with handle {rule['handle']}")
+                                    logged_tap_names.add(tap_name)
                             tap_rules.append({
                                 'handle': rule['handle'],
                                 'chain': rule['chain'],
                                 'interface': expr['match']['right']
-                        })
+                            })
 
         return tap_rules
 
@@ -131,7 +135,7 @@ class NetworkManager:
                 links = ipr.link_lookup(ifname=bridge_name)
                 if not links:
                     if self._config.verbose:
-                        self.logger.info(f"Bridge device {bridge_name} not found")
+                        self._logger.info(f"Bridge device {bridge_name} not found")
                     return False
 
                 link_info = ipr.get_links(links[0])[0]
@@ -140,7 +144,7 @@ class NetworkManager:
                         for info_attr_name, info_attr_value in attr_value.get('attrs', []):
                             if info_attr_name == 'IFLA_INFO_KIND' and info_attr_value == 'bridge':
                                 if self._config.verbose:
-                                    self.logger.info(f"Bridge device {bridge_name} exists")
+                                    self._logger.info(f"Bridge device {bridge_name} exists")
                                 return True
 
                 return False
@@ -164,12 +168,8 @@ class NetworkManager:
             with IPRoute() as ipr:
                 links = ipr.link_lookup(ifname=tap_device_name)
                 if not bool(links):
-                    if self._config.verbose:
-                        self.logger.info(f"Tap device {tap_device_name} not found")
                     return False
                 else:
-                    if self._config.verbose:
-                        self.logger.info(f"Tap device {tap_device_name} found")
                     return True
 
         except Exception as e:
@@ -252,7 +252,7 @@ class NetworkManager:
         for rule in rules:
             rc, output, error = self._nft.json_cmd(rule)
             if self._config.verbose:
-                self.logger.info("Added NAT forwarding rule")
+                self._logger.info("Added NAT forwarding rule")
 
             if rc != 0 and "File exists" not in str(error):
                 raise NetworkError(f"Failed to add NAT forwarding rule: {error}")
@@ -272,7 +272,7 @@ class NetworkManager:
         try:
             result = output[1]['nftables']
             if self._config.verbose:
-                self.logger.debug(f"Found {len(result)} rules in the filter table")
+                self._logger.debug(f"Found {len(result)} rules in the filter table")
             return result
 
         except Exception as e:
@@ -316,7 +316,7 @@ class NetworkManager:
 
                 if has_interface_match and has_masquerade:
                     if self._config.verbose:
-                        self.logger.info(f"Found masquerade rule for {iface_name} with handle {rule.get('handle')}")
+                        self._logger.info(f"Found masquerade rule for {iface_name} with handle {rule.get('handle')}")
                     return rule.get('handle')
 
         return None
@@ -335,7 +335,7 @@ class NetworkManager:
         handle = self.get_masquerade_handle(iface_name)
         if handle is not None:
             if self._config.verbose:
-                self.logger.info(f"Masquerade rule for {iface_name} already exists with handle {handle}")
+                self._logger.info(f"Masquerade rule for {iface_name} already exists with handle {handle}")
             return handle
 
         add_cmd = {
@@ -366,11 +366,11 @@ class NetworkManager:
         result = self._nft.json_cmd(add_cmd)
         if not result[0]:
             if self._config.verbose:
-                self.logger.info(f"Created masquerade rule for {iface_name}")
+                self._logger.info(f"Created masquerade rule for {iface_name}")
             return self.get_masquerade_handle(iface_name)
         else:
             if self._config.verbose:
-                self.logger.warn(f"Failed to create masquerade rule: {result[1]}")
+                self._logger.warn(f"Failed to create masquerade rule: {result[1]}")
             return None
 
     def get_port_forward_handles(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int):
@@ -430,12 +430,12 @@ class NetworkManager:
                         if 'dnat' in e and e['dnat']['addr'] == dest_ip and e['dnat']['port'] == dest_port:
                             has_correct_dnat = True
                             if self._config.verbose:
-                                self.logger.info(f"Prerouting rule: {dest_ip}:{dest_port}")
+                                self._logger.info(f"Prerouting rule: {dest_ip}:{dest_port}")
 
                     if has_daddr_match and has_dport_match and has_correct_dnat:
                         if self._config.verbose:
-                            self.logger.debug(f"Found matching prerouting port forward rule {rule}")
-                            self.logger.info(f"Found prerouting rule with handle {rule['handle']}")
+                            self._logger.debug(f"Found matching prerouting port forward rule {rule}")
+                            self._logger.info(f"Found prerouting rule with handle {rule['handle']}")
                         rules['prerouting'] = rule['handle']
 
                 # Check for POSTROUTING rules (for outgoing traffic)
@@ -459,19 +459,87 @@ class NetworkManager:
 
                     if has_saddr_match and has_masquerade:
                         if self._config.verbose:
-                            self.logger.debug(f"Found matching postrouting masquerade rule {rule}")
-                            self.logger.info(f"Found postrouting rule with handle {rule['handle']}")
+                            self._logger.debug(f"Found matching postrouting masquerade rule {rule}")
+                            self._logger.info(f"Found postrouting rule with handle {rule['handle']}")
                         rules['postrouting'] = rule['handle']
 
             if not rules and self._config.verbose:
-                self.logger.info("No port forwarding rules found")
+                self._logger.info("No port forwarding rules found")
 
             return rules
 
         except Exception as e:
             raise NetworkError(f"Failed to get nftables rules: {str(e)}")
 
-    def add_port_forward(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int, protocol: str = "tcp"):
+    def get_port_forward_by_comment(self, id: str, host_port: int):
+        """Get port forwarding rules by matching the comment pattern.
+
+        Args:
+            id (str): Machine ID to search for
+            host_port (int): Host port to search for
+
+        Returns:
+            dict: Dictionary containing handles for prerouting and postrouting rules.
+
+        Raises:
+            NetworkError: If retrieving nftables rules fails.
+        """
+        list_cmd = {
+            "nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]
+        }
+
+        try:
+            output = self._nft.json_cmd(list_cmd)
+            result = output[1]['nftables']
+            rules = {}
+            expected_comment = f"machine_id={id} host_port={host_port}"
+
+            for item in result:
+                if 'rule' not in item:
+                    continue
+
+                rule = item['rule']
+                chain = rule.get('chain', '').upper()  # Normalize chain name to uppercase
+                comment = rule.get('comment', '')
+
+                # Check for PREROUTING rules with matching comment
+                if rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'PREROUTING':
+                    if comment == expected_comment:
+                        if self._config.verbose:
+                            self._logger.info(f"Found prerouting rule with matching comment: {comment}")
+                            self._logger.debug(f"Rule details: {rule}")
+                        rules['prerouting'] = rule['handle']
+
+                # Check for POSTROUTING rules (for the same machine)
+                elif rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'POSTROUTING':
+                    expr = rule.get('expr', [])
+                    has_saddr_match = False
+                    has_masquerade = False
+
+                    for e in expr:
+                        if 'match' in e and e['match']['op'] == '==' and \
+                            'payload' in e['match']['left'] and e['match']['left']['payload']['field'] == 'saddr':
+                            if isinstance(e['match']['right'], dict) and 'prefix' in e['match']['right']:
+                                has_saddr_match = True
+
+                        if 'masquerade' in e:
+                            has_masquerade = True
+
+                    if has_saddr_match and has_masquerade:
+                        if self._config.verbose:
+                            self._logger.debug(f"Found matching postrouting masquerade rule {rule}")
+                            self._logger.info(f"Found postrouting rule with handle {rule['handle']}")
+                        rules['postrouting'] = rule['handle']
+
+            if not rules and self._config.verbose:
+                self._logger.info(f"No port forwarding rules found for machine_id={id} host_port={host_port}")
+
+            return rules
+
+        except Exception as e:
+            raise NetworkError(f"Failed to get nftables rules: {str(e)}")
+
+    def add_port_forward(self, id: str, host_ip: str, host_port: int, dest_ip: str, dest_port: int, protocol: str = "tcp"):
         """Port forward a port to a new IP and port.
 
         Args:
@@ -485,10 +553,12 @@ class NetworkManager:
             NetworkError: If adding nftables port forwarding rule fails.
         """
         # First check if the rules already exist
-        existing_rules = self.get_port_forward_handles(host_ip, host_port, dest_ip, dest_port)
+        # existing_rules = self.get_port_forward_handles(host_ip, host_port, dest_ip, dest_port)
+
+        existing_rules = self.get_port_forward_by_comment(id, host_port)
         if existing_rules:
             if self._config.verbose:
-                self.logger.info("Port forwarding rules already exist")
+                self._logger.info("Port forwarding rules already exist")
             return
 
         # Create the rules
@@ -534,6 +604,7 @@ class NetworkManager:
                             "family": "ip",
                             "table": "nat",
                             "chain": "PREROUTING",
+                            "comment": f"machine_id={id} host_port={host_port}",
                             "expr": [
                                 {
                                     "match": {
@@ -610,7 +681,7 @@ class NetworkManager:
                     raise NetworkError(f"Failed to add port forwarding rule: {error}")
 
             if self._config.verbose:
-                self.logger.info(f"Added port forwarding rule: {host_ip}:{host_port} -> {dest_ip}:{dest_port}")
+                self._logger.info(f"Added port forwarding rule: {host_ip}:{host_port} -> {dest_ip}:{dest_port}")
 
         except Exception as e:
             raise NetworkError(f"Failed to add port forwarding rules: {str(e)}")
@@ -633,9 +704,9 @@ class NetworkManager:
         try:
             if self._config.verbose:
                 if rc == 0:
-                    self.logger.info(f"Rule with handle {rule['handle']} deleted")
+                    self._logger.info(f"Rule with handle {rule['handle']} deleted")
                 else:
-                    self.logger.error(f"Error deleting rule with handle {rule['handle']}: {error}")
+                    self._logger.error(f"Error deleting rule with handle {rule['handle']}: {error}")
 
             return rc == 0
 
@@ -651,11 +722,11 @@ class NetworkManager:
         rules = self.get_nat_rules()
         tap_rules = self.find_tap_interface_rules(rules, tap_name)
         if self._config.verbose:
-            self.logger.info(f"Found {len(rules)} total rules and {len(tap_rules)} rules for {tap_name}")
+            self._logger.info(f"Found {len(rules)} total rules and {len(tap_rules)} rules for {tap_name}")
 
         for rule in tap_rules:
             if self._config.verbose:
-                self.logger.debug(f"Deleting rule: {rule}")
+                self._logger.debug(f"Deleting rule: {rule}")
             self.delete_rule(rule)
 
     def delete_port_forward(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int):
@@ -670,44 +741,107 @@ class NetworkManager:
         Raises:
             NetworkError: If deleting port forwarding rules fails.
         """
-        rules = self.get_port_forward_handles(host_ip, host_port, dest_ip, dest_port)
-        if not rules:
-            if self._config.verbose:
-                self.logger.info("No port forwarding rules found to delete")
-            return
+        if not isinstance(host_port, int) or host_port < 1 or host_port > 65535:
+            raise ValueError(f"Invalid host port number: {host_port}. Must be between 1 and 65535.")
 
         try:
-            if 'prerouting' in rules:
-                handle = rules['prerouting']
-                cmd = f'delete rule nat PREROUTING handle {handle}'
-                rc, output, error = self._nft.cmd(cmd)
+            # Get all NAT rules
+            output = self._nft.json_cmd({"nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]})
+            rules = output[1]['nftables']
 
-                if self._config.verbose:
-                    if rc == 0:
-                        self.logger.info(f"Prerouting rule with handle {handle} deleted")
-                    else:
-                        self.logger.warn(f"Error deleting prerouting rule with handle {handle}: {error}")
+            # Find and delete rules with matching host port
+            for item in rules:
+                if 'rule' not in item:
+                    continue
 
-            if 'postrouting' in rules:
-                handle = rules['postrouting']
-                # Always use uppercase POSTROUTING as that's the standard in nftables
-                cmd = f'delete rule nat POSTROUTING handle {handle}'
-                rc, output, error = self._nft.cmd(cmd)
+                rule = item['rule']
+                comment = rule.get('comment', '')
+                
+                if f"host_port={host_port}" in comment:
+                    chain = rule.get('chain', '').upper()
+                    handle = rule['handle']
+                    
+                    cmd = f'delete rule nat {chain} handle {handle}'
+                    rc, _, error = self._nft.cmd(cmd)
 
-                if self._config.verbose:
-                    if rc == 0:
-                        self.logger.info(f"Postrouting rule with handle {handle} deleted")
-                    else:
-                        self.logger.warn(f"Error deleting postrouting rule with handle {handle}: {error}")
+                    if self._config.verbose:
+                        if rc == 0:
+                            self._logger.info(f"{chain} rule with handle {handle} deleted")
+                        else:
+                            self._logger.warn(f"Error deleting {chain} rule with handle {handle}: {error}")
+
+            if self._config.verbose:
+                self._logger.info(f"Completed port forwarding rules deletion for host_port={host_port}")
 
         except Exception as e:
             raise NetworkError(f"Failed to delete port forward rules: {str(e)}")
 
-    def detect_cidr_conflict(self, ip_address: str, prefix_len: int = 24) -> bool:
+    def delete_all_port_forward(self, id: str):
+        """Delete all port forwarding rules for a given machine ID.
+
+        Args:
+            id (str): Machine ID to search for and delete all associated port forwarding rules.
+
+        Raises:
+            NetworkError: If deleting port forwarding rules fails.
+        """
+        list_cmd = {
+            "nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]
+        }
+
+        try:
+            output = self._nft.json_cmd(list_cmd)
+            result = output[1]['nftables']
+            rules_to_delete = {}
+
+            for item in result:
+                if 'rule' not in item:
+                    continue
+
+                rule = item['rule']
+                chain = rule.get('chain', '').upper()  # Normalize chain name to uppercase
+                comment = rule.get('comment', '')
+
+                # Check if the comment contains the machine ID
+                if comment and f"machine_id={id}" in comment:
+                    if chain == 'PREROUTING':
+                        if 'prerouting' not in rules_to_delete:
+                            rules_to_delete['prerouting'] = []
+                        rules_to_delete['prerouting'].append(rule['handle'])
+                    elif chain == 'POSTROUTING':
+                        if 'postrouting' not in rules_to_delete:
+                            rules_to_delete['postrouting'] = []
+                        rules_to_delete['postrouting'].append(rule['handle'])
+
+            if not rules_to_delete:
+                if self._config.verbose:
+                    self._logger.info(f"No port forwarding rules found for machine_id={id}")
+                return
+
+            # Delete all found rules
+            for chain, handles in rules_to_delete.items():
+                for handle in handles:
+                    # Always use uppercase chain names in nftables commands
+                    cmd = f'delete rule nat {chain.upper()} handle {handle}'
+                    rc, output, error = self._nft.cmd(cmd)
+
+                    if self._config.verbose:
+                        if rc == 0:
+                            self._logger.info(f"{chain} rule with handle {handle} deleted")
+                        else:
+                            self._logger.warn(f"Error deleting {chain} rule with handle {handle}: {error}")
+
+            if self._config.verbose:
+                self._logger.info(f"Deleted all port forwarding rules for machine_id={id}")
+
+        except Exception as e:
+            raise NetworkError(f"Failed to delete port forward rules: {str(e)}")
+
+    def detect_cidr_conflict(self, ip_addr: str, prefix_len: int = 24) -> bool:
         """Check if the given IP address and prefix length conflict with existing interfaces.
         
         Args:
-            ip_address (str): IP address to check for conflicts
+            ip_addr (str): IP address to check for conflicts
             prefix_len (int): Network prefix length (default 24 for /24 networks)
             
         Returns:
@@ -717,22 +851,18 @@ class NetworkManager:
             NetworkError: If the IP address format is invalid
         """
         try:
-            # Create network object from the given IP and prefix
-            new_network = IPv4Network(f"{ip_address}/{prefix_len}", strict=False)
+            new_network = IPv4Network(f"{ip_addr}/{prefix_len}", strict=False)
             
             with IPRoute() as ipr:
-                # Get all interfaces
                 interfaces = ipr.get_links()
                 
                 for interface in interfaces:
                     idx = interface['index']
-                    # Get addresses for each interface
                     addresses = ipr.get_addr(index=idx)
                     
                     for addr in addresses:
                         for attr_name, attr_value in addr.get('attrs', []):
                             if attr_name == 'IFA_ADDRESS':
-                                # Skip IPv6 addresses
                                 if ':' in attr_value:
                                     continue
                                 
@@ -741,20 +871,19 @@ class NetworkManager:
                                     f"{attr_value}/{existing_prefix}", 
                                     strict=False
                                 )
-                                
-                                # Check for network overlap
+
                                 if new_network.overlaps(existing_network):
                                     if self._config.verbose:
-                                        self.logger.warn(
+                                        self._logger.warn(
                                             f"CIDR conflict detected: {new_network} "
                                             f"overlaps with existing {existing_network}"
                                         )
                                     return True
-            
             return False
             
         except (AddressValueError, ValueError) as e:
             raise NetworkError(f"Invalid IP address format: {str(e)}")
+
         except Exception as e:
             raise NetworkError(f"Failed to check CIDR conflicts: {str(e)}")
             
@@ -787,7 +916,7 @@ class NetworkManager:
                     
                     if not self.detect_cidr_conflict(new_ip, prefix_len):
                         if self._config.verbose:
-                            self.logger.info(f"Suggested non-conflicting IP: {new_ip}")
+                            self._logger.info(f"Suggested non-conflicting IP: {new_ip}")
                         return new_ip
             
             raise NetworkError("Unable to find a non-conflicting IP address")
@@ -818,40 +947,28 @@ class NetworkManager:
         try:
             if not self.check_tap_device(name):
                 if self._config.verbose:
-                    self.logger.info(f"Creating tap device {name}")
+                    self._logger.info(f"Creating tap device {name}")
                 with IPRoute() as ipr:
                     ipr.link('add', ifname=name, kind='tuntap', mode='tap')
                     if self._config.verbose:
-                        self.logger.info(f"Created tap device {name}")
-
-                    if bridge:
-                        self.attach_tap_to_bridge(iface_name, self._config.bridge_name)
+                        self._logger.info(f"Created tap device {name}")
 
                     idx = ipr.link_lookup(ifname=name)[0]
                     ipr.link('set', index=idx, state='up')
                     if self._config.verbose:
-                        self.logger.info(f"Set tap device {name} up")
+                        self._logger.info(f"Set tap device {name} up")
 
-                    if not bridge:
+                    if bridge:
+                        self.attach_tap_to_bridge(iface_name, self._config.bridge_name)
+                    else:
                         self.add_nat_rules(name, iface_name)
                         self.ensure_masquerade(iface_name)
 
                     if gateway_ip:
                         try:
-                            # Check for CIDR conflicts
-                            if self.detect_cidr_conflict(gateway_ip, 24):
-                                # Attempt to find a non-conflicting IP
-                                alternative_ip = self.suggest_non_conflicting_ip(gateway_ip, 24)
-                                if self._config.verbose:
-                                    self.logger.warn(
-                                        f"IP conflict detected with {gateway_ip}. "
-                                        f"Using alternative: {alternative_ip}"
-                                    )
-                                gateway_ip = alternative_ip
-                                
                             ipr.addr('add', index=idx, address=gateway_ip, prefixlen=24)
                             if self._config.verbose:
-                                self.logger.info(f"Set {gateway_ip} as gateway on tap device {name}")
+                                self._logger.info(f"Set {gateway_ip} as gateway on tap device {name}")
                         except Exception as e:
                             raise NetworkError(f"Failed to set gateway IP: {str(e)}")
 
@@ -873,7 +990,7 @@ class NetworkManager:
                 idx = ipr.link_lookup(ifname=iface_name)[0]
                 ipr.link('set', index=idx, master=bridge_idx)
                 if self._config.verbose:
-                    self.logger.info(f"Attached tap device {iface_name} to bridge {bridge_name}")
+                    self._logger.info(f"Attached tap device {iface_name} to bridge {bridge_name}")
             return True
 
         except Exception as e:
@@ -892,7 +1009,7 @@ class NetworkManager:
                 idx = ipr.link_lookup(ifname=name)[0]
                 ipr.link('del', index=idx)
                 if self._config.verbose:
-                    self.logger.info(f"Removed tap device {name}")
+                    self._logger.info(f"Removed tap device {name}")
 
     def cleanup(self, tap_device: str):
         """Clean up network resources including tap device and firewall rules using nftables.
@@ -901,15 +1018,10 @@ class NetworkManager:
             tap_device (str): Name of the tap device to clean up.
         """
         try:
-            if self._config.verbose:
-                self.logger.info(f"Beginning thorough cleanup for {tap_device}")
-            
-            # Get the IP address associated with this tap device
             tap_ip = None
             with IPRoute() as ipr:
                 if self.check_tap_device(tap_device):
                     idx = ipr.link_lookup(ifname=tap_device)[0]
-                    # Get addresses for the interface
                     addresses = ipr.get_addr(index=idx)
                     for addr in addresses:
                         for attr_name, attr_value in addr.get('attrs', []):
@@ -917,10 +1029,9 @@ class NetworkManager:
                                 tap_ip = attr_value
                                 break
 
-            # Delete all NAT rules related to this tap device
             if not self._config.bridge:
                 if self._config.verbose:
-                    self.logger.info(f"Deleting firewall rules for {tap_device}")
+                    self._logger.info(f"Deleting firewall rules for {tap_device}")
                 self.delete_nat_rules(tap_device)
             
             # Delete the tap device itself
@@ -929,96 +1040,26 @@ class NetworkManager:
             # Clear the ARP cache if we know the IP
             if tap_ip:
                 if self._config.verbose:
-                    self.logger.info(f"Clearing ARP cache entry for {tap_ip}")
+                    self._logger.info(f"Clearing ARP cache entry for {tap_ip}")
                 run(f"ip neigh del {tap_ip} dev {self.get_interface_name()} 2>/dev/null || true")
                 
             # Check for stale routes and remove them
             if tap_ip:
                 network_prefix = '.'.join(tap_ip.split('.')[:3]) + '.0/24'
                 if self._config.verbose:
-                    self.logger.info(f"Checking for stale routes to network {network_prefix}")
+                    self._logger.info(f"Checking for stale routes to network {network_prefix}")
                 # Delete any routes to this network through the tap device
                 run(f"ip route del {network_prefix} 2>/dev/null || true")
             
             # Flush the IP rule cache
             if self._config.verbose:
-                self.logger.info("Flushing routing cache")
+                self._logger.info("Flushing routing cache")
             run("ip route flush cache 2>/dev/null || true")
                 
             if self._config.verbose:
-                self.logger.info(f"Cleanup for {tap_device} completed successfully")
+                self._logger.info(f"Cleanup for {tap_device} completed successfully")
                 
         except Exception as e:
-            self.logger.error(f"Error during cleanup of {tap_device}: {str(e)}")
+            self._logger.error(f"Error during cleanup of {tap_device}: {str(e)}")
             # Continue with cleanup despite errors
 
-    def enable_nat_internet_access(self, tap_name: str, iface_name: str, vm_ip: str):
-        """Enable NAT-based internet access for a MicroVM.
-
-        This method sets up the necessary NAT rules to allow the VM to access the internet
-        through the host's network interface.
-
-        Args:
-            tap_name (str): Name of the tap device.
-            iface_name (str): Name of the host network interface.
-            vm_ip (str): IP address of the VM.
-
-        Raises:
-            NetworkError: If enabling NAT internet access fails.
-        """
-        try:
-            if self._config.verbose:
-                self.logger.info(f"Enabling NAT internet access for VM {vm_ip}")
-
-            # Add basic NAT rules
-            self.add_nat_rules(tap_name, iface_name)
-
-            # Ensure masquerade rule exists for outgoing traffic
-            self.ensure_masquerade(iface_name)
-
-            # Add forwarding rules for the VM's subnet
-            rules = {
-                "nftables": [
-                    {
-                        "add": {
-                            "rule": {
-                                "family": "ip",
-                                "table": "filter",
-                                "chain": "FORWARD",
-                                "expr": [
-                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": iface_name}},
-                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": tap_name}},
-                                    {"counter": {"packets": 0, "bytes": 0}},
-                                    {"accept": None}
-                                ]
-                            }
-                        }
-                    },
-                    {
-                        "add": {
-                            "rule": {
-                                "family": "ip",
-                                "table": "filter",
-                                "chain": "FORWARD",
-                                "expr": [
-                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": tap_name}},
-                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": iface_name}},
-                                    {"counter": {"packets": 0, "bytes": 0}},
-                                    {"accept": None}
-                                ]
-                            }
-                        }
-                    }
-                ]
-            }
-
-            for rule in rules["nftables"]:
-                rc, output, error = self._nft.json_cmd({"nftables": [rule]})
-                if rc != 0 and "File exists" not in str(error):
-                    raise NetworkError(f"Failed to add NAT rule: {error}")
-
-            if self._config.verbose:
-                self.logger.info("NAT internet access enabled successfully")
-
-        except Exception as e:
-            raise NetworkError(f"Failed to enable NAT internet access: {str(e)}")
