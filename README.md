@@ -60,15 +60,17 @@ To get started with **firecracker-python**, go to the [getting start guide](docs
 
 Here are some examples of how to use the library.
 
-#### Create a microVM with custom configuration and list them all.
+#### Create a microVM with custom configuration and list them all
 
 ```python
 from firecracker import MicroVM
 
-vm = MicroVM(id="<vm_id>", vcpu=2, mem_size_mib=4096)
+# Create a new microVM with custom configuration
+vm = MicroVM(vcpu=2, mem_size_mib=4096)
 vm.create()
 
-vms = MicroVM.list()
+# List all running microVMs
+vms = MicroVM.list()  # Static method to list all VMs
 for vm in vms:
     print(f"VM with id {vm['id']} has IP {vm['ip_addr']} and is in state {vm['state']}")
 ```
@@ -78,13 +80,36 @@ for vm in vms:
 ```python
 from firecracker import MicroVM
 
-vm = MicroVM(id="<vm_id>")
-vm.delete()         # Delete a single microVM by id
-# Or
-vm.delete(all=True) # Delete all microVMs
+# Create a new microVM
+vm = MicroVM()
+vm.create()
+
+# Delete the microVM just created
+vm.delete()
+
+# Delete a specific microVM by ID
+vm.delete(id="<specific_id>")
+
+# Delete all microVMs
+vm.delete(all=True)
 ```
 
 #### Enable port forwarding
+
+During initialization:
+
+```python
+from firecracker import MicroVM
+
+# Single port
+vm = MicroVM(expose_ports=True, host_port=10222, dest_port=22)
+# Multiple ports
+# vm = MicroVM(expose_ports=True, host_port=[10222, 10280], dest_port=[22, 80])
+
+vm.create()
+```
+
+After creation you can also expose ports using the `port_forward` function:
 
 ```python
 from firecracker import MicroVM
@@ -92,18 +117,20 @@ from firecracker import MicroVM
 vm = MicroVM()
 vm.create()
 
+# Forward a single port
 vm.port_forward(host_port=10222, dest_port=22)
-# [2025-03-20T07:45:52.215] [INFO] Added nftables port forwarding rule
-# 'Port forwarding active: x.x.x.x:10222 -> 172.16.0.2:22'
+# 'Port forwarding added successfully'
 
+# Forward multiple ports
+vm.port_forward(host_port=[10222, 10280], dest_port=[22, 80])
+# 'Port forwarding added successfully'
+
+# Remove port forwarding
 vm.port_forward(host_port=10222, dest_port=22, remove=True)
-# [2025-03-20T07:46:11.062] [INFO] Found postrouting rule with handle 16
-# [2025-03-20T07:46:11.062] [INFO] Prerouting rule: 172.16.0.2:22
-# [2025-03-20T07:46:11.062] [INFO] Found prerouting rule with handle 17
-# [2025-03-20T07:46:11.063] [INFO] Prerouting rule with handle 17 deleted
-# [2025-03-20T07:46:11.065] [INFO] Postrouting rule with handle 16 deleted
-# 'Port forwarding rule removed: x.x.x.x:10222 -> 172.16.0.2:22'
+# 'Port forwarding removed successfully'
 ```
+
+> **Note:** When using port forwarding, you need to specify both `host_port` and `dest_port`. The number of host ports must match the number of destination ports.
 
 ### License
 
