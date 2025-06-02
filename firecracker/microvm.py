@@ -28,9 +28,9 @@ class MicroVM:
     """
     def __init__(self, name: str = None, kernel_file: str = None, initrd_file: str = None, init_file: str = None,
                  base_rootfs: str = None, rootfs_url: str = None, overlayfs: bool = False, overlayfs_file: str = None,
-                 vcpu: int = None, mem_size_mib: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None,
-                 mmds_enabled: bool = None, mmds_ip: str = None, user_data: str = None, user_data_file: str = None, labels: dict = None,
-                 expose_ports: bool = False, host_port: int = None, dest_port: int = None,
+                 vcpu: int = None, memory: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None,
+                 mmds_enabled: bool = None, mmds_ip: str = None, user_data: str = None, user_data_file: str = None,
+                 labels: dict = None, expose_ports: bool = False, host_port: int = None, dest_port: int = None,
                  verbose: bool = False, level: str = "INFO") -> None:
         """Initialize a new MicroVM instance with configuration."""
         self._microvm_id = generate_id()
@@ -46,15 +46,12 @@ class MicroVM:
         self._vmm = VMMManager(verbose=verbose, level=level)
 
         self._vcpu = vcpu or self._config.vcpu
-        self._mem = self._convert_memory_size(mem_size_mib or self._config.mem_size_mib)
+        self._memory = int(self._convert_memory_size(memory or self._config.memory))
         self._mmds_enabled = mmds_enabled if mmds_enabled is not None else self._config.mmds_enabled
         self._mmds_ip = mmds_ip or self._config.mmds_ip
 
         if not isinstance(self._vcpu, int) or self._vcpu <= 0:
             raise ValueError("vcpu must be a positive integer")
-
-        if self._mem < 128:
-            raise ValueError("Memory size must be at least 128 MiB")
 
         if user_data_file and user_data:
             raise ValueError("Cannot specify both user_data and user_data_file. Use only one of them.")
@@ -727,11 +724,11 @@ class MicroVM:
 
             self._api.machine_config.put(
                 vcpu_count=self._vcpu,
-                mem_size_mib=self._mem
+                mem_size_mib=self._memory
             )
 
             if self._config.verbose:
-                self._logger.info(f"VMM is configured with {self._vcpu} vCPUs and {self._mem} MiB of memory")
+                self._logger.info(f"VMM is configured with {self._vcpu} vCPUs and {self._memory} MiB of memory")
 
         except Exception as e:
             raise ConfigurationError(f"Failed to configure VMM resources: {str(e)}")
@@ -889,7 +886,7 @@ class MicroVM:
             return max(size, MIN_MEMORY)
             
         if isinstance(size, str):
-            size = size.upper()
+            size = size.upper().strip()
             try:
                 if size.endswith('G'):
                     # Convert GB to MiB and ensure minimum
