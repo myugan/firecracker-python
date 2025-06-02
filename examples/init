@@ -1,0 +1,34 @@
+#!/bin/sh
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+set -e
+
+log() {
+    echo "$1" > /dev/console
+    echo "init: $1" > /dev/kmsg
+}
+
+log "Init booting"
+
+for i in {1..10}; do
+    TOKEN=$(curl -s -f -m 2 -X PUT "http://169.254.169.254/latest/api/token" -H "X-metadata-token-ttl-seconds: 21600" 2>/dev/null) && {
+        USERDATA=$(curl -s -f -H "X-metadata-token: ${TOKEN}" "http://169.254.169.254/latest/user-data" 2>/dev/null) && {
+            if [ -n "$USERDATA" ] && [ "$USERDATA" != "404 - Not Found" ]; then
+                log "Executing user-data script"
+                (
+                    mkdir -p /var/log
+                    printf '%s' "$USERDATA" | sed 's/^"//; s/"$//' > /tmp/userdata.sh
+                    chmod +x /tmp/userdata.sh
+                    /bin/sh /tmp/userdata.sh 2>&1 | tee -a /var/log/init.log
+                    rm -f /tmp/userdata.sh
+                    log "User-data done"
+                ) &
+            fi
+        }
+        break
+    }
+    sleep 1
+done
+
+exec /sbin/init "$@"

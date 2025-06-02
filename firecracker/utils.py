@@ -74,6 +74,19 @@ def generate_name() -> str:
     return generated_name
 
 
+def generate_mac_address() -> str:
+    """Generate a random MAC address for the MicroVM instance.
+
+    Returns:
+        str: A random MAC address in the format XX:XX:XX:XX:XX:XX
+    """
+    # Generate 6 random bytes
+    mac_bytes = [random.randint(0, 255) for _ in range(6)]
+    # Convert to hex and format with colons
+    mac_address = ':'.join([f'{b:02x}' for b in mac_bytes])
+    return mac_address
+
+
 def requires_id(func):
     """Decorator to check if VMM ID is provided."""
     def wrapper(*args, **kwargs):

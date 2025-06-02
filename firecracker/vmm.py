@@ -58,7 +58,6 @@ class VMMManager:
             },
             "Ports": kwargs.get("Ports", {}),
             "Labels": kwargs.get("Labels", {}),
-            "WorkingDir": kwargs.get("WorkingDir", "/root"),
             "LogPath": kwargs.get("LogPath", f"/var/lib/firecracker/{id}/logs")
         }
 

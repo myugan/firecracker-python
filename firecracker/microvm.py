@@ -15,7 +15,7 @@ from firecracker.logger import Logger
 from firecracker.network import NetworkManager
 from firecracker.process import ProcessManager
 from firecracker.vmm import VMMManager
-from firecracker.utils import run, get_public_ip, validate_ip_address, generate_id, generate_name
+from firecracker.utils import run, get_public_ip, validate_ip_address, generate_id, generate_name, generate_mac_address
 from firecracker.exceptions import APIError, VMMError, ConfigurationError, ProcessError
 import paramiko.ssh_exception
 
@@ -26,67 +26,77 @@ class MicroVM:
     Args:
         id (str, optional): ID for the MicroVM
     """
-    def __init__(self, name: str = None, kernel_file: str = None, base_rootfs: str = None, rootfs_url: str = None, vcpu: int = None, mem_size_mib: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None, mmds_enabled: bool = None, mmds_ip: str = None, labels: dict = None, working_dir: str = '/root', expose_ports: bool = False, host_port: int = None, dest_port: int = None, verbose: bool = False, level: str = "INFO") -> None:
-        """Initialize a new MicroVM instance with configuration.
-
-        Args:
-            id (str, optional): ID for the MicroVM
-            hostname (str, optional): Hostname for the MicroVM
-            kernel_file (str, optional): Path to the kernel file
-            base_rootfs (str, optional): Path to the base rootfs file
-            vcpu (int, optional): Number of vCPUs
-            mem_size_mib (int, optional): Memory size in MiB
-            ip_addr (str, optional): IP address for the MicroVM
-            bridge (bool, optional): Whether to use a bridge for networking
-            bridge_name (str, optional): Name of the bridge interface
-            mmds_enabled (bool, optional): Whether to enable MMDS
-            mmds_ip (str, optional): IP address for MMDS
-            labels (dict, optional): Labels for the MicroVM
-            working_dir (str, optional): Working directory for the MicroVM
-            verbose (bool, optional): Enable verbose logging
-            level (str, optional): Log level (DEBUG, INFO, WARN, ERROR). Defaults to INFO
-        """
-        # Generate IDs and Names
+    def __init__(self, name: str = None, kernel_file: str = None, initrd_file: str = None, init_file: str = None,
+                 base_rootfs: str = None, rootfs_url: str = None, overlayfs: bool = False, overlayfs_file: str = None,
+                 vcpu: int = None, memory: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None,
+                 mmds_enabled: bool = None, mmds_ip: str = None, user_data: str = None, user_data_file: str = None,
+                 labels: dict = None, expose_ports: bool = False, host_port: int = None, dest_port: int = None,
+                 verbose: bool = False, level: str = "INFO") -> None:
+        """Initialize a new MicroVM instance with configuration."""
         self._microvm_id = generate_id()
         self._microvm_name = generate_name() if name is None else name
 
-        # Configuration
         self._config = MicroVMConfig()
-        self._vcpu = self._config.vcpu_count if vcpu is None else vcpu
-        self._mem_size_mib = self._config.mem_size_mib if mem_size_mib is None else mem_size_mib
-        self._mmds_enabled = self._config.mmds_enabled if mmds_enabled is None else mmds_enabled
-        self._mmds_ip = self._config.mmds_ip if mmds_ip is None else mmds_ip
-
-        self._labels = labels if labels is not None else {}
-        self._working_dir = working_dir
-
         self._config.verbose = verbose
         self._logger = Logger(level=level, verbose=verbose)
         self._logger.set_level(level)
+
         self._network = NetworkManager(verbose=verbose, level=level)
         self._process = ProcessManager(verbose=verbose, level=level)
         self._vmm = VMMManager(verbose=verbose, level=level)
 
-        self._socket_file = f"{self._config.data_path}/{self._microvm_id}/firecracker.socket"
-        self._api = self._vmm.get_api(self._microvm_id)
+        self._vcpu = vcpu or self._config.vcpu
+        self._memory = int(self._convert_memory_size(memory or self._config.memory))
+        self._mmds_enabled = mmds_enabled if mmds_enabled is not None else self._config.mmds_enabled
+        self._mmds_ip = mmds_ip or self._config.mmds_ip
 
-        self._kernel_file = kernel_file if kernel_file else self._config.kernel_file
-        if rootfs_url:
-            self._base_rootfs = self._download_rootfs(rootfs_url)
+        if not isinstance(self._vcpu, int) or self._vcpu <= 0:
+            raise ValueError("vcpu must be a positive integer")
+
+        if user_data_file and user_data:
+            raise ValueError("Cannot specify both user_data and user_data_file. Use only one of them.")
+        if user_data_file:
+            if not os.path.exists(user_data_file):
+                raise ValueError(f"User data file not found: {user_data_file}")
+            with open(user_data_file, 'r') as f:
+                self._user_data = f.read()
         else:
-            self._base_rootfs = base_rootfs if base_rootfs else self._config.base_rootfs
-        base_rootfs_name = os.path.basename(self._base_rootfs.replace('./', ''))
-        self._vmm_dir = f"{self._config.data_path}/{self._microvm_id}"
-        self._log_dir = f"{self._vmm_dir}/logs"
-        self._rootfs_dir = f"{self._vmm_dir}/rootfs"
-        self._rootfs_file = os.path.join(self._rootfs_dir, base_rootfs_name)
+            self._user_data = user_data
+
+        self._labels = labels or {}
 
         self._iface_name = self._network.get_interface_name()
         self._host_dev_name = f"tap_{self._microvm_id}"
-        self._ip_addr = ip_addr if ip_addr is not None else self._config.ip_addr
+        self._mac_addr = generate_mac_address()
+        self._ip_addr = ip_addr or self._config.ip_addr
         self._gateway_ip = self._network.get_gateway_ip(self._ip_addr)
-        self._bridge = self._config.bridge if bridge is None else bridge
-        self._bridge_name = self._config.bridge_name if bridge_name is None else bridge_name
+        self._bridge = bridge if bridge is not None else self._config.bridge
+        self._bridge_name = bridge_name or self._config.bridge_name
+
+        if self._ip_addr:
+            validate_ip_address(self._ip_addr)
+
+        self._socket_file = f"{self._config.data_path}/{self._microvm_id}/firecracker.socket"
+        self._vmm_dir = f"{self._config.data_path}/{self._microvm_id}"
+        self._log_dir = f"{self._vmm_dir}/logs"
+        self._rootfs_dir = f"{self._vmm_dir}/rootfs"
+
+        self._kernel_file = kernel_file or self._config.kernel_file
+        self._initrd_file = initrd_file or self._config.initrd_file
+        self._init_file = init_file or self._config.init_file
+
+        if rootfs_url:
+            self._base_rootfs = self._download_rootfs(rootfs_url)
+        else:
+            self._base_rootfs = base_rootfs or self._config.base_rootfs
+        base_rootfs_name = os.path.basename(self._base_rootfs.replace('./', ''))
+        self._rootfs_file = os.path.join(self._rootfs_dir, base_rootfs_name)
+
+        self._overlayfs = overlayfs or self._config.overlayfs
+        if self._overlayfs:
+            self._overlayfs_file = overlayfs_file or os.path.join(self._rootfs_dir, "overlayfs.ext4")
+            self._overlayfs_name = os.path.basename(self._overlayfs_file.replace('./', ''))
+            self._overlayfs_dir = os.path.join(self._rootfs_dir, self._overlayfs_name)
 
         self._ssh_client = SSHClient()
         self._expose_ports = expose_ports
@@ -94,13 +104,7 @@ class MicroVM:
         self._host_port = self._parse_ports(host_port)
         self._dest_port = self._parse_ports(dest_port)
 
-        if not isinstance(self._vcpu, int) or self._vcpu <= 0:
-            raise ValueError("vcpu must be a positive integer")
-        if not isinstance(self._mem_size_mib, int) or self._mem_size_mib < 128:
-            raise ValueError("mem_size_mib must be valid")
-
-        if hasattr(self, '_ip_addr') and self._ip_addr:
-            validate_ip_address(self._ip_addr)
+        self._api = self._vmm.get_api(self._microvm_id)
 
     @staticmethod
     def list() -> List[Dict]:
@@ -242,8 +246,7 @@ class MicroVM:
                     Pid=pid,
                     Ports=ports,
                     IPAddress=self._ip_addr,
-                    Labels=self._labels,
-                    WorkingDir=self._working_dir
+                    Labels=self._labels
                 )
                 return f"VMM {self._microvm_id} is created successfully"
             else:
@@ -645,19 +648,18 @@ class MicroVM:
     @property
     def _boot_args(self):
         """Generate boot arguments using current configuration."""
+        common_args = (
+            "console=ttyS0 reboot=k panic=1 "
+            f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
+            f"{self._microvm_name}:{self._iface_name}:on"
+        )
+
         if self._mmds_enabled:
-            return (
-                "console=ttyS0 reboot=k panic=1 "
-                f"ds=nocloud-net;s=http://{self._mmds_ip}/latest/ "
-                f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
-                f"{self._microvm_name}:{self._iface_name}:on "
-            )
+            return f"{common_args} init={self._init_file}"
+        elif self._overlayfs:
+            return f"{common_args} init={self._init_file} overlay_root=/vdb"
         else:
-            return (
-                "console=ttyS0 reboot=k panic=1 "
-                f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
-                f"{self._microvm_name}:{self._iface_name}:on "
-            )
+            return f"{common_args}"
 
     def _configure_vmm_boot_source(self):
         """Configure the boot source for the microVM."""
@@ -668,10 +670,16 @@ class MicroVM:
             if not os.path.exists(self._kernel_file):
                 raise ConfigurationError(f"Kernel file not found: {self._kernel_file}")
 
-            boot_response = self._api.boot.put(
-                kernel_image_path=self._kernel_file,
-                boot_args=self._boot_args
-            )
+            boot_params = {
+                'kernel_image_path': self._kernel_file,
+                'boot_args': self._boot_args
+            }
+
+            if self._initrd_file:
+                boot_params['initrd_path'] = self._initrd_file
+                self._logger.info(f"Using initrd file: {self._initrd_file}")
+
+            boot_response = self._api.boot.put(**boot_params)
 
             if self._config.verbose:
                 self._logger.debug(f"Boot configuration response: {boot_response}")
@@ -683,18 +691,26 @@ class MicroVM:
     def _configure_vmm_root_drive(self):
         """Configure the root drive for the microVM."""
         try:
-            if self._config.verbose:
-                self._logger.info("Configuring root drive...")
-
             drive_response = self._api.drive.put(
                 drive_id="rootfs",
-                path_on_host=self._rootfs_file,
+                path_on_host=self._rootfs_file if not self._overlayfs else self._base_rootfs,
                 is_root_device=True,
-                is_read_only=False
+                is_read_only=self._overlayfs is True
             )
-
             if self._config.verbose:
                 self._logger.info(f"Root drive configured with {self._rootfs_file}")
+
+            if self._overlayfs:
+                if self._config.verbose:
+                    self._logger.info("Configuring overlayfs...")
+
+                self._api.drive.put(
+                    drive_id="overlayfs",
+                    path_on_host=self._overlayfs_file,
+                    is_root_device=False,
+                    is_read_only=False
+                )
+
                 self._logger.debug(f"Drive configuration response: {drive_response}")
 
         except Exception:
@@ -708,11 +724,11 @@ class MicroVM:
 
             self._api.machine_config.put(
                 vcpu_count=self._vcpu,
-                mem_size_mib=self._mem_size_mib
+                mem_size_mib=self._memory
             )
 
             if self._config.verbose:
-                self._logger.info(f"VMM is configured with {self._vcpu} vCPUs and {self._mem_size_mib} MiB of memory")
+                self._logger.info(f"VMM is configured with {self._vcpu} vCPUs and {self._memory} MiB of memory")
 
         except Exception as e:
             raise ConfigurationError(f"Failed to configure VMM resources: {str(e)}")
@@ -736,6 +752,7 @@ class MicroVM:
 
             self._api.network.put(
                 iface_id=self._iface_name,
+                guest_mac=self._mac_addr,
                 host_dev_name=self._host_dev_name
             )
 
@@ -763,7 +780,24 @@ class MicroVM:
                 network_interfaces=[self._iface_name]
             )
 
+            user_data = {
+                "latest": {
+                    "meta-data": {
+                        "instance-id": self._microvm_id,
+                        "local-hostname": self._microvm_name
+                    }
+                }
+            }
+
+            if self._user_data:
+                user_data["latest"]["user-data"] = self._user_data
+                if hasattr(self, '_user_data_file') and self._user_data_file:
+                    user_data["latest"]["meta-data"]["user-data-file"] = self._user_data_file
+
+            mmds_data_response = self._api.mmds.put(**user_data)
+
             if self._config.verbose:
+                self._logger.debug(f"MMDS data response: {mmds_data_response}")
                 self._logger.info("MMDS data configured")
 
         except Exception as e:
@@ -774,12 +808,14 @@ class MicroVM:
         try:
             self._vmm._ensure_socket_file(self._microvm_id)
 
-            for path in [self._vmm_dir, f"{self._vmm_dir}/rootfs", f"{self._vmm_dir}/logs"]:
+            paths = [self._vmm_dir, f"{self._vmm_dir}/rootfs", f"{self._vmm_dir}/logs"]
+            for path in paths:
                 self._vmm.create_vmm_dir(path)
 
-            run(f"cp {self._base_rootfs} {self._rootfs_file}")
-            if self._config.verbose:
-                self._logger.info(f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}")
+            if not self._overlayfs:
+                run(f"cp {self._base_rootfs} {self._rootfs_file}")
+                if self._config.verbose:
+                    self._logger.info(f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}")
 
             for log_file in [f"{self._microvm_id}.log", f"{self._microvm_id}_screen.log"]:
                 self._vmm.create_log_file(self._microvm_id, log_file)
@@ -804,7 +840,7 @@ class MicroVM:
             if os.path.exists(self._socket_file):
                 return Api(self._socket_file)
 
-            raise APIError(f"Failed to connect to the API socket")
+            raise APIError("Failed to connect to the API socket")
 
         except Exception as exc:
             self._vmm.cleanup(self._microvm_id)
@@ -834,3 +870,35 @@ class MicroVM:
 
         except Exception as e:
             raise VMMError(f"Failed to download rootfs from {url}: {str(e)}")
+
+    def _convert_memory_size(self, size):
+        """Convert memory size to MiB.
+        
+        Args:
+            size: Memory size in format like '1G', '2G', or plain number (assumed to be MiB)
+            
+        Returns:
+            int: Memory size in MiB
+        """
+        MIN_MEMORY = 128  # Minimum memory size in MiB
+        
+        if isinstance(size, int):
+            return max(size, MIN_MEMORY)
+            
+        if isinstance(size, str):
+            size = size.upper().strip()
+            try:
+                if size.endswith('G'):
+                    # Convert GB to MiB and ensure minimum
+                    mem_size = int(float(size[:-1]) * 1024)
+                elif size.endswith('M'):
+                    # Already in MiB, just convert
+                    mem_size = int(float(size[:-1]))
+                else:
+                    # If no unit specified, assume MiB
+                    mem_size = int(float(size))
+                
+                return max(mem_size, MIN_MEMORY)
+            except ValueError:
+                raise ValueError(f"Invalid memory size format: {size}")
+        raise ValueError(f"Invalid memory size type: {type(size)}")
