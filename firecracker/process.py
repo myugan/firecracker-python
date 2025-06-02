@@ -4,7 +4,6 @@ import psutil
 import signal
 import subprocess
 from datetime import datetime
-from tenacity import Retrying, stop_after_attempt, wait_fixed
 from firecracker.utils import run, safe_kill
 from firecracker.logger import Logger
 from firecracker.config import MicroVMConfig
