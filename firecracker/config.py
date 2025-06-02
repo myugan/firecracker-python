@@ -18,9 +18,9 @@ class MicroVMConfig:
     bridge_name: str = "docker0"
     mmds_enabled: bool = False
     mmds_ip: str = "169.254.169.254"
-    user_data: str = None   # cloud-init must be installed in the rootfs
+    user_data: str = None
     vcpu: int = 1
-    mem_size_mib: int = 512
+    memory: int = 512
     hostname: str = "fc-vm"
     verbose: bool = False
     level: str = "INFO"
