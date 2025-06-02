@@ -18,7 +18,7 @@ Some features are still being developed and will be added in the future. You can
 ## Table of Contents
 
 - [How to Install](#how-to-install)
-- [Features](#features)
+- [Key Features](#key-features)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
 - [License](#license)
@@ -43,7 +43,7 @@ pip3 install -r requirements.txt
 pip3 install -e .
 ```
 
-### Features
+### Key Features
 
 - Easily create microVMs with default or custom settings
 - View a list of all running microVMs
@@ -54,7 +54,7 @@ pip3 install -e .
 
 ### Getting Started
 
-To get started with **firecracker-python**, go to the [getting start guide](docs/getting-started.md)
+To get started with **firecracker-python**, check out the [getting started guide](docs/getting-started.md)
 
 ### Usage
 
@@ -66,7 +66,10 @@ Here are some examples of how to use the library.
 from firecracker import MicroVM
 
 # Create a new microVM with custom configuration
-vm = MicroVM(vcpu=2, mem_size_mib=4096)
+vm = MicroVM(vcpu=2, memory="4096")
+# Or
+vm = MicroVM(vcpu=2, memory="4G")
+
 vm.create()
 
 # List all running microVMs
