@@ -25,7 +25,7 @@ from firecracker import MicroVM
 # Create a microVM with custom resources
 vm = MicroVM(
     vcpu=2,
-    mem_size_mib=1024,
+    memory=1024,
     ip_addr="192.168.100.2"
 )
 vm.create()
@@ -197,7 +197,7 @@ from firecracker import MicroVM
 # Create a microVM with appropriate resources
 vm = MicroVM(
     vcpu=2,
-    mem_size_mib=1024,
+    memory=1024,
     ip_addr="192.168.100.2"
 )
 vm.create()
@@ -225,7 +225,7 @@ from firecracker import MicroVM
 vm = MicroVM(
     name="database",
     vcpu=4,
-    mem_size_mib=4096,
+    memory=4096,
     ip_addr="192.168.100.3"
 )
 vm.create()
@@ -250,7 +250,7 @@ from firecracker import MicroVM
 vm = MicroVM(
     name="dev-env",
     vcpu=2,
-    mem_size_mib=2048,
+    memory=2048,
     ip_addr="192.168.100.4"
 )
 vm.create()
