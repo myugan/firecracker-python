@@ -7,8 +7,11 @@ import select
 import termios
 import tty
 import requests
+import paramiko.ssh_exception
+from http import HTTPStatus
 from paramiko import SSHClient, AutoAddPolicy
 from typing import Tuple, List, Dict
+from contextlib import closing
 from firecracker.config import MicroVMConfig
 from firecracker.api import Api
 from firecracker.logger import Logger
@@ -17,7 +20,6 @@ from firecracker.process import ProcessManager
 from firecracker.vmm import VMMManager
 from firecracker.utils import run, get_public_ip, validate_ip_address, generate_id, generate_name, generate_mac_address
 from firecracker.exceptions import APIError, VMMError, ConfigurationError, ProcessError
-import paramiko.ssh_exception
 
 
 class MicroVM:
@@ -68,13 +70,12 @@ class MicroVM:
         self._iface_name = self._network.get_interface_name()
         self._host_dev_name = f"tap_{self._microvm_id}"
         self._mac_addr = generate_mac_address()
-        self._ip_addr = ip_addr or self._config.ip_addr
+        self._ip_addr = self._config.ip_addr if not ip_addr else validate_ip_address(ip_addr)
+        if self._network.detect_cidr_conflict(self._ip_addr, 24):
+            self._ip_addr = self._network.suggest_ip_address(self._ip_addr, 24)
         self._gateway_ip = self._network.get_gateway_ip(self._ip_addr)
         self._bridge = bridge if bridge is not None else self._config.bridge
         self._bridge_name = bridge_name or self._config.bridge_name
-
-        if self._ip_addr:
-            validate_ip_address(self._ip_addr)
 
         self._socket_file = f"{self._config.data_path}/{self._microvm_id}/firecracker.socket"
         self._vmm_dir = f"{self._config.data_path}/{self._microvm_id}"
@@ -162,9 +163,12 @@ class MicroVM:
         if not os.path.exists(config_file):
             return "VMM ID not exist"
 
-        with open(config_file, "r") as f:
-            config = json.load(f)
-            return config
+        try:
+            with open(config_file, "r") as f:
+                config = json.load(f)
+                return config
+        except Exception as e:
+            raise VMMError(f"Failed to inspect VMM {id}: {str(e)}")
 
     def status(self, id=None):
         """Get the status of the current VMM or a specific VMM.
@@ -177,12 +181,16 @@ class MicroVM:
         if not id:
             return "No VMM ID specified for checking status"
         
-        with open(f"{self._config.data_path}/{id}/config.json", "r") as f:
-            config = json.load(f)
-            if config['State']['Running']:
-                return f"VMM {id} is running"
-            elif config['State']['Paused']:
-                return f"VMM {id} is paused"
+        try:
+            with open(f"{self._config.data_path}/{id}/config.json", "r") as f:
+                config = json.load(f)
+                if config['State']['Running']:
+                    return f"VMM {id} is running"
+                elif config['State']['Paused']:
+                    return f"VMM {id} is paused"
+
+        except Exception as e:
+            raise VMMError(f"Failed to get status for VMM {id}: {str(e)}")
 
     def create(self) -> dict:
         vmm_dir = f"{self._config.data_path}/{self._microvm_id}"
@@ -193,20 +201,19 @@ class MicroVM:
             if self._vmm.check_network_overlap(self._ip_addr):
                 return f"IP address {self._ip_addr} is already in use"
 
-            if self._network.detect_cidr_conflict(self._gateway_ip, 24):
-                return f"CIDR conflict detected with {self._gateway_ip}"
+            self._network.setup(
+                tap_name=self._host_dev_name,
+                iface_name=self._iface_name,
+                gateway_ip=self._gateway_ip,
+                bridge=self._bridge,
+                bridge_name=self._bridge_name
+            )
 
             self._run_firecracker()
             if not self._basic_config():
                 return "Failed to configure VMM"
 
-            if self._config.verbose:
-                self._logger.info("VMM configuration completed")
-
             self._api.actions.put(action_type="InstanceStart")
-
-            if self._config.verbose:
-                self._logger.info(f"VMM ID: {self._microvm_id} is started successfully")
 
             if self._expose_ports:
                 if not self._host_port or not self._dest_port:
@@ -248,10 +255,8 @@ class MicroVM:
                     IPAddress=self._ip_addr,
                     Labels=self._labels
                 )
-                return f"VMM {self._microvm_id} is created successfully"
+                return f"VMM {self._microvm_id} created"
             else:
-                if self._config.verbose:
-                    self._logger.info(f"VMM {self._microvm_id} is failed to create, deleting the VMM")
                 self._vmm.delete_vmm(self._microvm_id)
                 return f"VMM {self._microvm_id} failed to create"
 
@@ -279,12 +284,15 @@ class MicroVM:
             self._vmm.update_vmm_state(id, "Paused")
 
             config_path = f"{self._config.data_path}/{id}/config.json"
-            with open(config_path, "r+") as file:
-                config = json.load(file)
-                config['State']['Paused'] = "true"
-                file.seek(0)
-                json.dump(config, file)
-                file.truncate()
+            try:
+                with open(config_path, "r+") as file:
+                    config = json.load(file)
+                    config['State']['Paused'] = "true"
+                    file.seek(0)
+                    json.dump(config, file)
+                    file.truncate()
+            except Exception as e:
+                raise VMMError(f"Failed to update VMM state: {str(e)}")
 
             return f"VMM {id} paused successfully"
 
@@ -309,12 +317,15 @@ class MicroVM:
             self._vmm.update_vmm_state(id, "Resumed")
 
             config_path = f"{self._config.data_path}/{id}/config.json"
-            with open(config_path, "r+") as file:
-                config = json.load(file)
-                config['State']['Paused'] = "false"
-                file.seek(0)
-                json.dump(config, file)
-                file.truncate()
+            try:
+                with open(config_path, "r+") as file:
+                    config = json.load(file)
+                    config['State']['Paused'] = "false"
+                    file.seek(0)
+                    json.dump(config, file)
+                    file.truncate()
+            except Exception as e:
+                raise VMMError(f"Failed to update VMM state: {str(e)}")
 
             return f"VMM {id} resumed successfully"
 
@@ -339,15 +350,11 @@ class MicroVM:
             if not vmm_list:
                 return "No VMMs available to delete"
 
-            # Handle deletion of all VMMs
             if all:
                 for vmm in vmm_list:
-                    if self._config.verbose:
-                        self._logger.info(f"Deleting VMM with ID {vmm['id']}")
                     self._vmm.delete_vmm(vmm['id'])
-                return "All VMMs deleted successfully"
+                return "All VMMs are deleted"
 
-            # Handle deletion of a specific VMM
             target_id = id if id else self._microvm_id
             if not target_id:
                 return "No VMM ID specified for deletion"
@@ -355,11 +362,8 @@ class MicroVM:
             if target_id not in [vmm['id'] for vmm in vmm_list]:
                 return f"VMM with ID {target_id} not found"
 
-            if self._config.verbose:
-                self._logger.info(f"Deleting VMM with ID {target_id}")
-
             self._vmm.delete_vmm(target_id)
-            return f"VMM {target_id} deleted successfully"
+            return f"VMM {target_id} is deleted"
 
         except Exception as e:
             self._logger.error(f"Error deleting VMM: {str(e)}")
@@ -421,41 +425,39 @@ class MicroVM:
             if self._config.verbose:
                 self._logger.info(f"Attempting SSH connection to {ip_addr} with user {self._config.ssh_user}")
 
-            channel = self._ssh_client.invoke_shell()
-
             try:
-                old_settings = termios.tcgetattr(sys.stdin)
-                tty.setraw(sys.stdin)
-            except (termios.error, AttributeError):
-                old_settings = None
+                channel = self._ssh_client.invoke_shell()
+                try:
+                    old_settings = termios.tcgetattr(sys.stdin)
+                    tty.setraw(sys.stdin)
+                except (termios.error, AttributeError):
+                    old_settings = None
 
-            try:
-                while True:
-                    if channel.exit_status_ready():
-                        break
-
-                    if channel.recv_ready():
-                        data = channel.recv(1024)
-                        if len(data) == 0:
+                try:
+                    while True:
+                        if channel.exit_status_ready():
                             break
-                        sys.stdout.buffer.write(data)
-                        sys.stdout.flush()
 
-                    if old_settings and sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
-                        char = sys.stdin.read(1)
-                        if not char:
+                        if channel.recv_ready():
+                            data = channel.recv(1024)
+                            if len(data) == 0:
+                                break
+                            sys.stdout.buffer.write(data)
+                            sys.stdout.flush()
+
+                        if old_settings and sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
+                            char = sys.stdin.read(1)
+                            if not char:
+                                break
+                            channel.send(char)
+                        elif not old_settings:
+                            time.sleep(5)
                             break
-                        channel.send(char)
-                    elif not old_settings:
-                        time.sleep(5)
-                        break
-            except Exception as e:
-                if self._config.verbose:
-                    self._logger.info(f"SSH session exited: {str(e)}")
+                finally:
+                    if old_settings:
+                        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                    channel.close()
             finally:
-                if old_settings:
-                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                channel.close()
                 self._ssh_client.close()
 
             message = f"SSH session to VMM {id or self._microvm_id} closed"
@@ -486,12 +488,10 @@ class MicroVM:
             if id not in available_vmm_ids:
                 return f"VMM with ID {id} does not exist"
 
-            # Get the host IP address
             host_ip = get_public_ip()
             if not host_ip:
                 raise VMMError("Could not determine host IP address")
 
-            # Get the VM's IP address from the config file
             config_path = f"{self._config.data_path}/{id}/config.json"
             if not os.path.exists(config_path):
                 raise VMMError(f"Config file not found for VMM {id}")
@@ -505,7 +505,6 @@ class MicroVM:
             if not dest_ip:
                 raise VMMError(f"Could not determine destination IP address for VMM {id}")
 
-            # Validate ports
             if not host_port or not dest_port:
                 raise ValueError("Both host_port and dest_port must be provided")
 
@@ -518,74 +517,16 @@ class MicroVM:
             if len(host_ports) != len(dest_ports):
                 raise ValueError("Number of host ports must match number of destination ports")
 
-            # Process each port pair
             for h_port, d_port in zip(host_ports, dest_ports):
                 if remove:
-                    self._network.delete_port_forward(host_ip, h_port, dest_ip, d_port)
-                    if self._config.verbose:
-                        self._logger.info(f"Removed port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}")
+                    self._network.delete_port_forward(id, h_port)
                 else:
                     self._network.add_port_forward(id, host_ip, h_port, dest_ip, d_port)
-                    if self._config.verbose:
-                        self._logger.info(f"Added port forwarding: {host_ip}:{h_port} -> {dest_ip}:{d_port}")
 
             return f"Port forwarding {'removed' if remove else 'added'} successfully"
 
         except Exception as e:
             raise VMMError(f"Failed to configure port forwarding: {str(e)}")
-
-    def execute_in_vm(self, id=None, commands=None):
-        """Execute commands in the VM console through the screen session.
-        
-        This method allows sending commands directly to the VM's console, which is useful
-        for configuring networking when SSH is not available.
-        
-        Args:
-            id (str, optional): VM ID. If not provided, uses the current VM ID.
-            commands (list): List of commands to execute in the VM console
-            
-        Returns:
-            bool: Success status
-            
-        Raises:
-            VMMError: If the command execution fails
-        """
-        if not commands:
-            return False
-        
-        id = id if id else self._microvm_id
-        session_name = f"fc_{id}"
-        
-        if self._config.verbose:
-            self._logger.info(f"Executing commands in VM {id} console")
-        
-        try:
-            # Prepare the commands with newlines
-            cmd_string = "\n".join(commands) + "\n"
-            
-            # Write commands to a temp file
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp:
-                temp_path = temp.name
-                temp.write(cmd_string)
-            
-            # Use screen's stuff command to send commands to the VM
-            stuff_cmd = f"screen -S {session_name} -X stuff $'$(cat {temp_path})'"
-            result = run(stuff_cmd)
-            
-            # Clean up temp file
-            import os
-            os.unlink(temp_path)
-            
-            if result.returncode == 0:
-                if self._config.verbose:
-                    self._logger.info(f"Successfully executed commands in VM {id}")
-                return True
-            else:
-                raise VMMError(f"Failed to execute commands in VM {id}: {result.stderr}")
-        
-        except Exception as e:
-            raise VMMError(f"Failed to execute commands in VM {id}: {str(e)}")
 
     def _parse_ports(self, port_value, default_value=None):
         """Parse port values from various input formats.
@@ -664,9 +605,6 @@ class MicroVM:
     def _configure_vmm_boot_source(self):
         """Configure the boot source for the microVM."""
         try:
-            if self._config.verbose:
-                self._logger.info("Configuring boot source...")
-
             if not os.path.exists(self._kernel_file):
                 raise ConfigurationError(f"Kernel file not found: {self._kernel_file}")
 
@@ -691,19 +629,16 @@ class MicroVM:
     def _configure_vmm_root_drive(self):
         """Configure the root drive for the microVM."""
         try:
-            drive_response = self._api.drive.put(
+            self._api.drive.put(
                 drive_id="rootfs",
                 path_on_host=self._rootfs_file if not self._overlayfs else self._base_rootfs,
                 is_root_device=True,
                 is_read_only=self._overlayfs is True
             )
             if self._config.verbose:
-                self._logger.info(f"Root drive configured with {self._rootfs_file}")
+                self._logger.info("Root drive configured")
 
             if self._overlayfs:
-                if self._config.verbose:
-                    self._logger.info("Configuring overlayfs...")
-
                 self._api.drive.put(
                     drive_id="overlayfs",
                     path_on_host=self._overlayfs_file,
@@ -711,7 +646,8 @@ class MicroVM:
                     is_read_only=False
                 )
 
-                self._logger.debug(f"Drive configuration response: {drive_response}")
+                if self._config.verbose:
+                    self._logger.info("Overlayfs drive configured")
 
         except Exception:
             raise ConfigurationError("Failed to configure root drive")
@@ -719,16 +655,13 @@ class MicroVM:
     def _configure_vmm_resources(self):
         """Configure machine resources (vCPUs and memory)."""
         try:
-            if self._config.verbose:
-                self._logger.info("Configuring VMM resources...")
-
             self._api.machine_config.put(
                 vcpu_count=self._vcpu,
                 mem_size_mib=self._memory
             )
 
             if self._config.verbose:
-                self._logger.info(f"VMM is configured with {self._vcpu} vCPUs and {self._memory} MiB of memory")
+                self._logger.info(f"Configured VMM with {self._vcpu} vCPUs and {self._memory} MiB RAM")
 
         except Exception as e:
             raise ConfigurationError(f"Failed to configure VMM resources: {str(e)}")
@@ -740,16 +673,6 @@ class MicroVM:
             NetworkError: If network configuration fails
         """
         try:
-            if self._config.verbose:
-                self._logger.info("Configuring VMM network interface...")
-
-            self._network.create_tap(
-                name=self._host_dev_name,
-                iface_name=self._iface_name,
-                gateway_ip=self._gateway_ip,
-                bridge=self._bridge
-            )
-
             self._api.network.put(
                 iface_id=self._iface_name,
                 guest_mac=self._mac_addr,
@@ -833,14 +756,20 @@ class MicroVM:
                 binary_path=self._config.binary_path,
                 binary_params=binary_params
             )
-
+            
             if not psutil.pid_exists(int(screen_pid)):
                 raise ProcessError("Firecracker process is not running")
 
-            if os.path.exists(self._socket_file):
-                return Api(self._socket_file)
+            for _ in range(3):
+                try:
+                    response = self._api.describe.get()
+                    if response.status_code == HTTPStatus.OK:
+                        return Api(self._socket_file)
+                except Exception:
+                    pass
+                time.sleep(0.5)
 
-            raise APIError("Failed to connect to the API socket")
+            raise APIError("Failed to connect to the API socket - API not responding with 200")
 
         except Exception as exc:
             self._vmm.cleanup(self._microvm_id)
@@ -853,20 +782,20 @@ class MicroVM:
             raise VMMError(f"Invalid URL: {url}")
 
         try:
-            response = requests.get(url, stream=True, timeout=10)
-            response.raise_for_status()
+            with closing(requests.get(url, stream=True, timeout=10)) as response:
+                response.raise_for_status()
 
-            if self._config.verbose:
-                self._logger.info(f"Downloading rootfs from {url}")
+                if self._config.verbose:
+                    self._logger.info(f"Downloading rootfs from {url}")
 
-            filename = url.split("/")[-1]
-            path = os.path.join(self._config.data_path, filename)
+                filename = url.split("/")[-1]
+                path = os.path.join(self._config.data_path, filename)
 
-            with open(path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                with open(path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
 
-            return path
+                return path
 
         except Exception as e:
             raise VMMError(f"Failed to download rootfs from {url}: {str(e)}")
