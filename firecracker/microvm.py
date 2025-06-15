@@ -52,8 +52,8 @@ class MicroVM:
         self._mmds_enabled = mmds_enabled if mmds_enabled is not None else self._config.mmds_enabled
         self._mmds_ip = mmds_ip or self._config.mmds_ip
 
-        if not isinstance(self._vcpu, int) or self._vcpu <= 0:
-            raise ValueError("vcpu must be a positive integer")
+        if not isinstance(self._vcpu, (int, float)) or self._vcpu <= 0:
+            raise ValueError("vcpu must be a positive number")
 
         if user_data_file and user_data:
             raise ValueError("Cannot specify both user_data and user_data_file. Use only one of them.")
