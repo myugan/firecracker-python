@@ -10,22 +10,7 @@ sys.path.append('/usr/lib/python3/dist-packages')
 try:
     from nftables import Nftables
 except ImportError:
-    print("Nftables module is not available. Using mock implementation for non-Linux systems.")
-    # Create a mock Nftables class for development/testing on non-Linux systems
-    class Nftables:
-        def __init__(self):
-            pass
-            
-        def set_json_output(self, value):
-            pass
-            
-        def json_cmd(self, cmd):
-            print(f"MOCK: Would execute nftables command: {cmd}")
-            return (0, {"nftables": []}, "")
-            
-        def cmd(self, cmd):
-            print(f"MOCK: Would execute nftables command: {cmd}")
-            return (0, "", "")
+    print("Nftables module is not available. Please install it.")
 
 
 class NetworkManager:
@@ -49,7 +34,7 @@ class NetworkManager:
         process = run("ip route | grep default | awk '{print $5}'")
         if process.returncode == 0:
             if self._config.verbose:
-                self._logger.info(f"Default interface name: {process.stdout.strip()}")
+                self._logger.debug(f"Default interface name: {process.stdout.strip()}")
 
             return process.stdout.strip()
         else:
@@ -76,6 +61,8 @@ class NetworkManager:
                 segments = ip_obj.exploded.split(':')
                 segments[-1] = '1'
                 gateway_ip = ipaddress.IPv6Address(':'.join(segments))
+                if self._config.verbose:
+                    self._logger.debug(f"Derived gateway IP: {gateway_ip}")
             else:
                 raise NetworkError(f"Unsupported IP address type: {ip}")
 
@@ -86,6 +73,18 @@ class NetworkManager:
 
         except Exception as e:
             raise NetworkError(f"Failed to derive gateway IP: {str(e)}")
+
+    def setup(self, tap_name: str, iface_name: str, bridge: bool, bridge_name: str, gateway_ip: str):
+        """Setup the network for the Firecracker VM."""
+        if not self.check_tap_device(tap_name):
+            self.create_tap(tap_name, iface_name, gateway_ip)
+
+        if bridge:
+            self.check_bridge_device(bridge_name)
+            self.attach_tap_to_bridge(iface_name, bridge_name)
+
+        self.add_nat_rules(tap_name, iface_name)
+        self.create_masquerade(iface_name)
 
     def find_tap_interface_rules(self, rules, tap_name):
         """Find rules that match the specified tap interface.
@@ -108,7 +107,7 @@ class NetworkManager:
                         if 'match' in expr and 'right' in expr['match'] and isinstance(expr['match']['right'], str) and tap_name in expr['match']['right']:
                             if self._config.verbose:
                                 if tap_name not in logged_tap_names:
-                                    self._logger.info(f"Found matching rule for {tap_name} with handle {rule['handle']}")
+                                    self._logger.debug(f"Found matching rule for {tap_name} with handle {rule['handle']}")
                                     logged_tap_names.add(tap_name)
                             tap_rules.append({
                                 'handle': rule['handle'],
@@ -185,77 +184,82 @@ class NetworkManager:
         Raises:
             NetworkError: If adding NAT forwarding rule fails.
         """
-        rules = [
-            {
-                "nftables": [
-                    {
-                        "add": {
-                            "table": {
-                                "family": "ip",
-                                "name": "nat"
+        try:
+            rules = [
+                {
+                    "nftables": [
+                        {
+                            "add": {
+                                "table": {
+                                    "family": "ip",
+                                    "name": "nat"
+                                }
+                            }
+                        },
+                        {
+                            "add": {
+                                "chain": {
+                                    "family": "ip",
+                                    "table": "nat",
+                                    "name": "POSTROUTING",
+                                    "type": "nat",
+                                    "hook": "postrouting",
+                                    "priority": 100,
+                                    "policy": "accept"
+                                }
+                            }
+                        },
+                        {
+                            "add": {
+                                "table": {
+                                    "family": "ip",
+                                    "name": "filter"
+                                }
+                            }
+                        },
+                        {
+                            "add": {
+                                "chain": {
+                                    "family": "ip",
+                                    "table": "filter",
+                                    "name": "FORWARD",
+                                    "type": "filter",
+                                    "hook": "forward",
+                                    "priority": 0,
+                                    "policy": "accept"
+                                }
+                            }
+                        },
+                        {
+                            "add": {
+                                "rule": {
+                                    "family": "ip",
+                                    "table": "filter",
+                                    "chain": "FORWARD",
+                                    "expr": [
+                                        {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": tap_name}},
+                                        {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": iface_name}},
+                                        {"counter": {"packets": 0, "bytes": 0}},
+                                        {"accept": None}
+                                    ]
+                                }
                             }
                         }
-                    },
-                    {
-                        "add": {
-                            "chain": {
-                                "family": "ip",
-                                "table": "nat",
-                                "name": "POSTROUTING",
-                                "type": "nat",
-                                "hook": "postrouting",
-                                "priority": 100,
-                                "policy": "accept"
-                            }
-                        }
-                    },
-                    {
-                        "add": {
-                            "table": {
-                                "family": "ip",
-                                "name": "filter"
-                            }
-                        }
-                    },
-                    {
-                        "add": {
-                            "chain": {
-                                "family": "ip",
-                                "table": "filter",
-                                "name": "FORWARD",
-                                "type": "filter",
-                                "hook": "forward",
-                                "priority": 0,
-                                "policy": "accept"
-                            }
-                        }
-                    },
-                    {
-                        "add": {
-                            "rule": {
-                                "family": "ip",
-                                "table": "filter",
-                                "chain": "FORWARD",
-                                "expr": [
-                                    {"match": {"left": {"meta": {"key": "iifname"}}, "op": "==", "right": tap_name}},
-                                    {"match": {"left": {"meta": {"key": "oifname"}}, "op": "==", "right": iface_name}},
-                                    {"counter": {"packets": 0, "bytes": 0}},
-                                    {"accept": None}
-                                ]
-                            }
-                        }
-                    }
-                ]
-            }
-        ]
+                    ]
+                }
+            ]
 
-        for rule in rules:
-            rc, output, error = self._nft.json_cmd(rule)
-            if self._config.verbose:
-                self._logger.info("Added NAT forwarding rule")
+            for rule in rules:
+                rc, output, error = self._nft.json_cmd(rule)
+                if self._config.verbose:
+                    self._logger.info("Added NAT forwarding rule")
+                    self._logger.debug(f"NAT forwarding rule: {output}")
 
-            if rc != 0 and "File exists" not in str(error):
-                raise NetworkError(f"Failed to add NAT forwarding rule: {error}")
+                if rc != 0 and "File exists" not in str(error):
+                    raise NetworkError(f"Failed to add NAT forwarding rule: {error}")
+
+        except Exception as e:
+            raise NetworkError(f"Failed to add NAT forwarding rule: {str(e)}")
 
     def get_nat_rules(self):
         """Get all rules from the filter table.
@@ -278,7 +282,7 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to get NAT forwarding rules: {str(e)}")
 
-    def get_masquerade_handle(self, id: str):
+    def get_masquerade_handle(self):
         """
         Get the handle value of a masquerade rule for the specified machine ID.
 
@@ -293,7 +297,7 @@ class NetworkManager:
 
         if not output[0]:
             result = output[1]['nftables']
-            expected_comment = f"machine_id={id}"
+            expected_comment = f"microVM outbound NAT"
 
             for item in result:
                 if 'rule' not in item:
@@ -314,12 +318,12 @@ class NetworkManager:
 
                 if comment == expected_comment and has_masquerade:
                     if self._config.verbose:
-                        self._logger.info(f"Found masquerade rule for machine {id} with handle {rule.get('handle')}")
+                        self._logger.debug(f"Found masquerade rule with handle {rule.get('handle')}")
                     return rule.get('handle')
 
         return None
 
-    def create_masquerade(self, id: str, iface_name: str):
+    def create_masquerade(self, iface_name: str):
         """
         Ensure a masquerade rule exists for the specified interface.
         Creates it if it doesn't exist, returns the handle if it does.
@@ -331,49 +335,49 @@ class NetworkManager:
         Returns:
             int: The handle value of the rule.
         """
-        # First check if a rule with this machine_id already exists
-        handle = self.get_masquerade_handle(id)
-        if handle is not None:
-            if self._config.verbose:
-                self._logger.info(f"Masquerade rule for machine {id} already exists with handle {handle}")
-            return handle
+        try:
+            handle = self.get_masquerade_handle()
+            if handle is not None:
+                if self._config.verbose:
+                    self._logger.info("Masquerade rule already exists")
+                return True
 
-        # Create a properly formatted rule with oifname, counter, and comment
-        add_cmd = {
-            "nftables": [
-                {
-                    "add": {
-                        "rule": {
-                            "family": "ip",
-                            "table": "nat",
-                            "chain": "POSTROUTING",
-                            "comment": f"machine_id={id}",
-                            "expr": [
-                                {
-                                    "match": {
-                                        "op": "==",
-                                        "left": {"meta": {"key": "oifname"}},
-                                        "right": iface_name
-                                    }
-                                },
-                                {"counter": {"packets": 0, "bytes": 0}},
-                                {"masquerade": None}
-                            ]
+            add_cmd = {
+                "nftables": [
+                    {
+                        "add": {
+                            "rule": {
+                                "family": "ip",
+                                "table": "nat",
+                                "chain": "POSTROUTING",
+                                "comment": f"microVM outbound NAT",
+                                "expr": [
+                                    {
+                                        "match": {
+                                            "op": "==",
+                                            "left": {"meta": {"key": "oifname"}},
+                                            "right": iface_name
+                                        }
+                                    },
+                                    {"counter": {"packets": 0, "bytes": 0}},
+                                    {"masquerade": None}
+                                ]
+                            }
                         }
                     }
-                }
-            ]
-        }
+                ]
+            }
 
-        result = self._nft.json_cmd(add_cmd)
-        if not result[0]:
-            if self._config.verbose:
-                self._logger.info(f"Created masquerade rule for machine {id} on interface {iface_name}")
-            return self.get_masquerade_handle(id)
-        else:
-            if self._config.verbose:
-                self._logger.warn(f"Failed to create masquerade rule for machine {id}: {result[1]}")
-            return None
+            result = self._nft.json_cmd(add_cmd)
+            if not result[0]:
+                if self._config.verbose:
+                    self._logger.info("Created masquerade rule")
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            raise NetworkError(f"Failed to create masquerade rule: {str(e)}")
 
     def get_port_forward_handles(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int):
         """Get port forwarding rules from the nat table.
@@ -410,7 +414,6 @@ class NetworkManager:
                 rule = item['rule']
                 chain = rule.get('chain', '').upper()  # Normalize chain name to uppercase
 
-                # Check for PREROUTING rules (for incoming traffic)
                 if rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'PREROUTING':
                     expr = rule.get('expr', [])
 
@@ -445,21 +448,17 @@ class NetworkManager:
                     expr = rule.get('expr', [])
                     has_saddr_match = False
                     has_masquerade = False
+                    comment = rule.get('comment', '')
 
                     for e in expr:
-                        # Check for source address match (VM's IP)
                         if 'match' in e and e['match']['op'] == '==' and \
                             'payload' in e['match']['left'] and e['match']['left']['payload']['field'] == 'saddr':
-                            if e['match']['right'] == dest_ip or \
-                               (isinstance(e['match']['right'], dict) and
-                                'prefix' in e['match']['right'] and
-                                e['match']['right']['prefix']['addr'] == dest_ip):
-                                has_saddr_match = True
+                            has_saddr_match = True
 
                         if 'masquerade' in e:
                             has_masquerade = True
 
-                    if has_saddr_match and has_masquerade:
+                    if has_saddr_match and has_masquerade and comment == f"machine_id={id}":
                         if self._config.verbose:
                             self._logger.debug(f"Found matching postrouting masquerade rule {rule}")
                             self._logger.info(f"Found postrouting rule with handle {rule['handle']}")
@@ -494,7 +493,8 @@ class NetworkManager:
             output = self._nft.json_cmd(list_cmd)
             result = output[1]['nftables']
             rules = {}
-            expected_comment = f"machine_id={id} host_port={host_port}"
+            prerouting_comment = f"machine_id={id} host_port={host_port}"
+            postrouting_comment = f"machine_id={id}"
 
             for item in result:
                 if 'rule' not in item:
@@ -506,31 +506,18 @@ class NetworkManager:
 
                 # Check for PREROUTING rules with matching comment
                 if rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'PREROUTING':
-                    if comment == expected_comment:
+                    if comment == prerouting_comment:
                         if self._config.verbose:
                             self._logger.info(f"Found prerouting rule with matching comment: {comment}")
                             self._logger.debug(f"Rule details: {rule}")
                         rules['prerouting'] = rule['handle']
 
-                # Check for POSTROUTING rules (for the same machine)
+                # Check for POSTROUTING rules with matching comment
                 elif rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'POSTROUTING':
-                    expr = rule.get('expr', [])
-                    has_saddr_match = False
-                    has_masquerade = False
-
-                    for e in expr:
-                        if 'match' in e and e['match']['op'] == '==' and \
-                            'payload' in e['match']['left'] and e['match']['left']['payload']['field'] == 'saddr':
-                            if isinstance(e['match']['right'], dict) and 'prefix' in e['match']['right']:
-                                has_saddr_match = True
-
-                        if 'masquerade' in e:
-                            has_masquerade = True
-
-                    if has_saddr_match and has_masquerade:
+                    if comment == postrouting_comment:
                         if self._config.verbose:
-                            self._logger.debug(f"Found matching postrouting masquerade rule {rule}")
-                            self._logger.info(f"Found postrouting rule with handle {rule['handle']}")
+                            self._logger.info(f"Found postrouting rule with matching comment: {comment}")
+                            self._logger.debug(f"Rule details: {rule}")
                         rules['postrouting'] = rule['handle']
 
             if not rules and self._config.verbose:
@@ -648,6 +635,7 @@ class NetworkManager:
                             "family": "ip",
                             "table": "nat",
                             "chain": "POSTROUTING",
+                            "comment": f"machine_id={id}",
                             "expr": [
                                 {
                                     "match": {
@@ -706,7 +694,7 @@ class NetworkManager:
         try:
             if self._config.verbose:
                 if rc == 0:
-                    self._logger.info(f"Rule with handle {rule['handle']} deleted")
+                    self._logger.debug(f"Rule with handle {rule['handle']} deleted")
                 else:
                     self._logger.error(f"Error deleting rule with handle {rule['handle']}: {error}")
 
@@ -721,81 +709,49 @@ class NetworkManager:
         Args:
             tap_name (str): Name of the tap device to delete rules for.
         """
-        rules = self.get_nat_rules()
-        tap_rules = self.find_tap_interface_rules(rules, tap_name)
-        if self._config.verbose:
-            self._logger.info(f"Found {len(rules)} total rules and {len(tap_rules)} rules for {tap_name}")
-
-        for rule in tap_rules:
+        try:
+            rules = self.get_nat_rules()
+            tap_rules = self.find_tap_interface_rules(rules, tap_name)
             if self._config.verbose:
-                self._logger.debug(f"Deleting rule: {rule}")
-            self.delete_rule(rule)
+                self._logger.debug(f"Found {len(tap_rules)} rules for {tap_name}")
 
-    def delete_masquerade(self, iface_name: str):
+            for rule in tap_rules:
+                self.delete_rule(rule)
+                if self._config.verbose:
+                    self._logger.debug(f"Deleted rule with handle {rule['handle']}")
+                    self._logger.info("Deleted NAT rules")
+
+        except Exception as e:
+            raise NetworkError(f"Failed to delete NAT rules: {str(e)}")
+
+    def delete_masquerade(self):
         """Delete masquerade rules for the specified interface.
-
-        Args:
-            iface_name (str): The interface name to delete masquerade rules for.
 
         Raises:
             NetworkError: If deleting masquerade rules fails.
         """
         try:
-            # Get all NAT rules
-            list_cmd = {"nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]}
-            output = self._nft.json_cmd(list_cmd)
-            result = output[1]['nftables']
+            handle = self.get_masquerade_handle()
+            if handle is not None:
+                cmd = f'delete rule nat POSTROUTING handle {handle}'
+                rc, output, error = self._nft.cmd(cmd)
 
-            for item in result:
-                if 'rule' not in item:
-                    continue
-
-                rule = item['rule']
-                if rule.get('chain') != 'POSTROUTING':
-                    continue
-
-                # Check for both oifname and ip saddr rules
-                should_delete = False
-                for expr in rule.get('expr', []):
-                    # Check for oifname match
-                    if 'match' in expr and 'meta' in expr['match']['left'] and \
-                       expr['match']['left']['meta']['key'] == 'oifname' and \
-                       expr['match']['right'] == iface_name:
-                        should_delete = True
-                        break
-                    
-                    # Check for ip saddr match
-                    if 'match' in expr and 'payload' in expr['match']['left'] and \
-                       expr['match']['left']['payload']['field'] == 'saddr':
-                        should_delete = True
-                        break
-
-                if should_delete:
-                    handle = rule.get('handle')
-                    if handle is not None:
-                        cmd = f'delete rule nat POSTROUTING handle {handle}'
-                        rc, output, error = self._nft.cmd(cmd)
-                        
-                        if self._config.verbose:
-                            if rc == 0:
-                                self._logger.info(f"Deleted masquerade rule with handle {handle}")
-                            else:
-                                self._logger.warn(f"Error deleting masquerade rule with handle {handle}: {error}")
-
-            if self._config.verbose:
-                self._logger.info(f"Completed masquerade rules deletion for {iface_name}")
+                if self._config.verbose:
+                    if rc == 0:
+                        self._logger.debug(f"Deleted masquerade rule with handle {handle}")
+                        self._logger.info("Deleted masquerade rules")
+                    else:
+                        self._logger.warn(f"Error deleting masquerade rule with handle {handle}: {error}")
 
         except Exception as e:
             raise NetworkError(f"Failed to delete masquerade rule: {str(e)}")
 
-    def delete_port_forward(self, host_ip: str, host_port: int, dest_ip: str, dest_port: int):
+    def delete_port_forward(self, id: str, host_port: int):
         """Delete port forwarding rules.
 
         Args:
-            host_ip (str): IP address being forwarded from.
             host_port (int): Port being forwarded.
-            dest_ip (str): IP address being forwarded to.
-            dest_port (int): Port being forwarded to.
+            machine_id (str): ID of the machine for which port forwarding is being deleted.
 
         Raises:
             NetworkError: If deleting port forwarding rules fails.
@@ -803,12 +759,13 @@ class NetworkManager:
         if not isinstance(host_port, int) or host_port < 1 or host_port > 65535:
             raise ValueError(f"Invalid host port number: {host_port}. Must be between 1 and 65535.")
 
+        if not id:
+            raise ValueError("id cannot be empty")
+
         try:
-            # Get all NAT rules
             output = self._nft.json_cmd({"nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]})
             rules = output[1]['nftables']
 
-            # Find and delete rules with matching host port
             for item in rules:
                 if 'rule' not in item:
                     continue
@@ -816,7 +773,7 @@ class NetworkManager:
                 rule = item['rule']
                 comment = rule.get('comment', '')
                 
-                if f"host_port={host_port}" in comment:
+                if f"machine_id={id} host_port={host_port}" in comment:
                     chain = rule.get('chain', '').upper()
                     handle = rule['handle']
                     
@@ -830,7 +787,7 @@ class NetworkManager:
                             self._logger.warn(f"Error deleting {chain} rule with handle {handle}: {error}")
 
             if self._config.verbose:
-                self._logger.info(f"Completed port forwarding rules deletion for host_port={host_port}")
+                self._logger.info(f"Deleted port forwarding rule for {id} with host port {host_port}")
 
         except Exception as e:
             raise NetworkError(f"Failed to delete port forward rules: {str(e)}")
@@ -858,10 +815,9 @@ class NetworkManager:
                     continue
 
                 rule = item['rule']
-                chain = rule.get('chain', '').upper()  # Normalize chain name to uppercase
+                chain = rule.get('chain', '').upper()
                 comment = rule.get('comment', '')
 
-                # Check if the comment contains the machine ID
                 if comment and f"machine_id={id}" in comment:
                     if chain == 'PREROUTING':
                         if 'prerouting' not in rules_to_delete:
@@ -874,24 +830,23 @@ class NetworkManager:
 
             if not rules_to_delete:
                 if self._config.verbose:
-                    self._logger.info(f"No port forwarding rules found for machine_id={id}")
+                    self._logger.info("No port forwarding rules found")
                 return
 
-            # Delete all found rules
             for chain, handles in rules_to_delete.items():
                 for handle in handles:
-                    # Always use uppercase chain names in nftables commands
                     cmd = f'delete rule nat {chain.upper()} handle {handle}'
                     rc, output, error = self._nft.cmd(cmd)
 
                     if self._config.verbose:
                         if rc == 0:
-                            self._logger.info(f"{chain} rule with handle {handle} deleted")
+                            self._logger.debug(f"{chain} rule with handle {handle} deleted")
+                            self._logger.info("Deleted port forwarding rules")
                         else:
                             self._logger.warn(f"Error deleting {chain} rule with handle {handle}: {error}")
 
             if self._config.verbose:
-                self._logger.info(f"Deleted all port forwarding rules for machine_id={id}")
+                self._logger.info(f"Deleted all port forwarding rules for {id}")
 
         except Exception as e:
             raise NetworkError(f"Failed to delete port forward rules: {str(e)}")
@@ -911,7 +866,7 @@ class NetworkManager:
         """
         try:
             new_network = IPv4Network(f"{ip_addr}/{prefix_len}", strict=False)
-            
+
             with IPRoute() as ipr:
                 interfaces = ipr.get_links()
                 
@@ -945,7 +900,7 @@ class NetworkManager:
 
         except Exception as e:
             raise NetworkError(f"Failed to check CIDR conflicts: {str(e)}")
-            
+
     def suggest_non_conflicting_ip(self, preferred_ip: str, prefix_len: int = 24) -> str:
         """Suggest a non-conflicting IP address based on the preferred IP.
         
@@ -960,22 +915,16 @@ class NetworkManager:
             NetworkError: If unable to find non-conflicting IP
         """
         try:
-            # Start with the preferred network
             ip_obj = ipaddress.ip_address(preferred_ip)
             
-            # Try up to 10 alternative networks by incrementing the third octet
             for i in range(10):
-                # Calculate a new network address with incremented third octet
                 if isinstance(ip_obj, IPv4Address):
-                    # Extract octets
                     octets = str(ip_obj).split('.')
-                    # Increment third octet and wrap around if needed
                     new_third_octet = (int(octets[2]) + i + 1) % 256
                     new_ip = f"{octets[0]}.{octets[1]}.{new_third_octet}.{octets[3]}"
                     
                     if not self.detect_cidr_conflict(new_ip, prefix_len):
-                        if self._config.verbose:
-                            self._logger.info(f"Suggested non-conflicting IP: {new_ip}")
+                        self._logger.debug(f"Suggested non-conflicting IP: {new_ip}")
                         return new_ip
             
             raise NetworkError("Unable to find a non-conflicting IP address")
@@ -983,8 +932,7 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to suggest non-conflicting IP: {str(e)}")
 
-    def create_tap(self, name: str = None, iface_name: str = None,
-                   gateway_ip: str = None, bridge: bool = False) -> None:
+    def create_tap(self, tap_name: str = None, iface_name: str = None, gateway_ip: str = None) -> None:
         """Create and configure a new tap device using pyroute2.
 
         Args:
@@ -997,44 +945,28 @@ class NetworkManager:
             NetworkError: If tap device creation or configuration fails.
             ConfigurationError: If required parameters are missing.
         """
-        if not name or (iface_name and len(iface_name) > 16):
-            if not name:
-                raise ConfigurationError("Tap device name is required")
+        if not tap_name or (iface_name and len(iface_name) > 16):
+            if not tap_name:
+                raise ConfigurationError("TAP device name is required")
             else:
-                raise ValueError("iface_name must not exceed 16 characters")
+                # pyroute2 issue: https://github.com/svinota/pyroute2/issues/452#issuecomment-363702389
+                raise ValueError("Interface name must not exceed 16 characters")
 
         try:
-            if not self.check_tap_device(name):
+            with IPRoute() as ipr:
+                ipr.link('add', ifname=tap_name, kind='tuntap', mode='tap')
+                idx = ipr.link_lookup(ifname=tap_name)[0]
+                if gateway_ip:
+                    ipr.addr('add', index=idx, address=gateway_ip, prefixlen=24)
+
+                ipr.link('set', index=idx, state='up')
+                
                 if self._config.verbose:
-                    self._logger.info(f"Creating tap device {name}")
-                with IPRoute() as ipr:
-                    ipr.link('add', ifname=name, kind='tuntap', mode='tap')
-                    if self._config.verbose:
-                        self._logger.info(f"Created tap device {name}")
-
-                    idx = ipr.link_lookup(ifname=name)[0]
-                    ipr.link('set', index=idx, state='up')
-                    if self._config.verbose:
-                        self._logger.info(f"Set tap device {name} up")
-
-                    if bridge:
-                        self.attach_tap_to_bridge(iface_name, self._config.bridge_name)
-                    else:
-                        self.add_nat_rules(name, iface_name)
-                        machine_id = name[4:]
-                        self.create_masquerade(machine_id, iface_name)
-
-                    if gateway_ip:
-                        try:
-                            ipr.addr('add', index=idx, address=gateway_ip, prefixlen=24)
-                            if self._config.verbose:
-                                self._logger.info(f"Set {gateway_ip} as gateway on tap device {name}")
-                        except Exception as e:
-                            raise NetworkError(f"Failed to set gateway IP: {str(e)}")
+                    self._logger.debug(f"Created TAP device {tap_name}")
 
         except Exception as e:
-            self.cleanup(name)
-            raise NetworkError(f"Failed to create tap device {name}: {str(e)}")
+            self.cleanup(tap_name)
+            raise NetworkError(f"Failed to create TAP device {tap_name}: {str(e)}")
 
     def attach_tap_to_bridge(self, iface_name: str, bridge_name: str):
         """Attach a tap device to a bridge.
@@ -1044,13 +976,13 @@ class NetworkManager:
             bridge_name (str): Name of the bridge to attach the tap device to.
         """
         try:
-            self.check_bridge_device(bridge_name)
             with IPRoute() as ipr:
                 bridge_idx = ipr.link_lookup(ifname=bridge_name)[0]
                 idx = ipr.link_lookup(ifname=iface_name)[0]
                 ipr.link('set', index=idx, master=bridge_idx)
                 if self._config.verbose:
                     self._logger.info(f"Attached tap device {iface_name} to bridge {bridge_name}")
+
             return True
 
         except Exception as e:
@@ -1064,67 +996,31 @@ class NetworkManager:
         Args:
             name (str): Name of the tap device to clean up.
         """
-        with IPRoute() as ipr:
-            if self.check_tap_device(name):
-                idx = ipr.link_lookup(ifname=name)[0]
-                ipr.link('del', index=idx)
-                if self._config.verbose:
-                    self._logger.info(f"Removed tap device {name}")
+        try:
+            with IPRoute() as ipr:
+                if self.check_tap_device(name):
+                    idx = ipr.link_lookup(ifname=name)[0]
+                    ipr.link('del', index=idx)
+                    if self._config.verbose:
+                        self._logger.info(f"Removed tap device {name}")
+            return True
+
+        except Exception as e:
+            raise NetworkError(f"Failed to delete tap device {name}: {str(e)}")
 
     def cleanup(self, tap_device: str):
-        """Clean up network resources including tap device and firewall rules using nftables.
+        """Clean up network resources including TAP device and firewall rules.
 
         Args:
             tap_device (str): Name of the tap device to clean up.
         """
         try:
-            tap_ip = None
-            with IPRoute() as ipr:
-                if self.check_tap_device(tap_device):
-                    idx = ipr.link_lookup(ifname=tap_device)[0]
-                    addresses = ipr.get_addr(index=idx)
-                    for addr in addresses:
-                        for attr_name, attr_value in addr.get('attrs', []):
-                            if attr_name == 'IFA_ADDRESS':
-                                tap_ip = attr_value
-                                break
+            self.delete_nat_rules(tap_device)
+            machine_id = tap_device[4:]
 
-            if not self._config.bridge:
-                self.delete_nat_rules(tap_device)
-                if self._config.verbose:
-                    self._logger.info(f"Deleted firewall rules for {tap_device}")
-
-                self.delete_masquerade(self.get_interface_name())
-                
-                machine_id = tap_device[4:]  # Remove 'tap_' prefix
-                self.delete_all_port_forward(machine_id)
-            
-            # Delete the tap device itself
+            self.delete_masquerade()
+            self.delete_all_port_forward(machine_id)
             self.delete_tap(tap_device)
-            
-            # Clear the ARP cache if we know the IP
-            if tap_ip:
-                if self._config.verbose:
-                    self._logger.info(f"Clearing ARP cache entry for {tap_ip}")
-                run(f"ip neigh del {tap_ip} dev {self.get_interface_name()} 2>/dev/null || true")
-                
-            # Check for stale routes and remove them
-            if tap_ip:
-                network_prefix = '.'.join(tap_ip.split('.')[:3]) + '.0/24'
-                if self._config.verbose:
-                    self._logger.info(f"Checking for stale routes to network {network_prefix}")
-                # Delete any routes to this network through the tap device
-                run(f"ip route del {network_prefix} 2>/dev/null || true")
-            
-            # Flush the IP rule cache
-            if self._config.verbose:
-                self._logger.info("Flushing routing cache")
-            run("ip route flush cache 2>/dev/null || true")
-                
-            if self._config.verbose:
-                self._logger.info(f"Cleanup for {tap_device} completed successfully")
-                
-        except Exception as e:
-            self._logger.error(f"Error during cleanup of {tap_device}: {str(e)}")
-            # Continue with cleanup despite errors
 
+        except Exception as e:
+            raise NetworkError(f"Failed to cleanup network resources: {str(e)}")

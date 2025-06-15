@@ -26,7 +26,11 @@ class Logger:
             verbose (bool): Enable verbose (DEBUG) logging
         """
         self.logger = logging.getLogger('microvm')
+        self.logger.propagate = False
         self.verbose = verbose
+
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
 
         console_handler = logging.StreamHandler()
         formatter = logging.Formatter(
@@ -35,9 +39,7 @@ class Logger:
         )
         console_handler.addFilter(self._add_colored_levelname)
         console_handler.setFormatter(formatter)
-
-        if not self.logger.handlers:
-            self.logger.addHandler(console_handler)
+        self.logger.addHandler(console_handler)
 
         self.set_level(level)
 
@@ -56,6 +58,7 @@ class Logger:
         Args:
             level (str): Log level to set (INFO, ERROR, WARNING, DEBUG)
         """
+        level = level.upper()
         logging_level = self.LEVEL_MAP.get(level, logging.INFO)
         self.logger.setLevel(logging_level)
         self.current_level = level
@@ -67,15 +70,16 @@ class Logger:
             level (str): Level to log at (INFO, ERROR, WARNING, DEBUG)
             message (str): Message to log
         """
+        level = level.upper()
         if level not in self.LEVEL_MAP:
             level = "INFO"  # Default to INFO for unknown levels
 
-        # If not in verbose mode, only show ERROR and WARNING messages
-        if not self.verbose and level in ["DEBUG", "INFO"]:
-            return
+        msg_level = self.LEVEL_MAP[level]
+        current_level = self.LEVEL_MAP[self.current_level]
 
-        log_method = getattr(self.logger, level.lower())
-        log_method(message)
+        if msg_level >= current_level:
+            log_method = getattr(self.logger, level.lower())
+            log_method(message)
 
     def info(self, message: str):
         """Log an info message."""

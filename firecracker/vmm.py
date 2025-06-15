@@ -61,11 +61,15 @@ class VMMManager:
             "LogPath": kwargs.get("LogPath", f"/var/lib/firecracker/{id}/logs")
         }
 
-        file_path = f"{self._config.data_path}/{id}/config.json"
-        with open(file_path, 'w') as json_file:
-            json.dump(vm_data, json_file, indent=4)
+        try:
+            file_path = f"{self._config.data_path}/{id}/config.json"
+            with open(file_path, 'w') as json_file:
+                json.dump(vm_data, json_file, indent=4)
 
-        return file_path
+            return file_path
+
+        except Exception as e:
+            raise VMMError(f"Failed to create VMM config file: {str(e)}") from e
 
     def list_vmm(self) -> List[Dict]:
         """List all VMMs using their config.json files.
@@ -311,7 +315,7 @@ class VMMManager:
             if not os.path.exists(path):
                 os.makedirs(path, exist_ok=True)
                 if self._config.verbose:
-                    self._logger.info(f"Created directory at {path}")
+                    self._logger.info(f"Directory {path} is created")
 
         except Exception as e:
             raise VMMError(f"Failed to create directory at {path}: {str(e)}")
@@ -329,11 +333,11 @@ class VMMManager:
                 with open(f"{log_dir}/{log_file}", 'w'):
                     pass
                 if self._config.verbose:
-                    self._logger.info(f"Created log file {log_dir}/{log_file}")
+                    self._logger.info(f"Log file {log_dir}/{log_file} is created")
 
         except Exception as e:
             raise VMMError(
-                f"Unable to create log directory at {log_dir}: {str(e)}"
+                f"Unable to create log file at {log_dir}: {str(e)}"
             )
 
     def delete_vmm_dir(self, id: str = None):
@@ -350,8 +354,6 @@ class VMMManager:
             vmm_dir = f"{self._config.data_path}/{id}"
 
             if os.path.exists(vmm_dir):
-                if self._config.verbose:
-                    self._logger.info(f"Deleting directory {vmm_dir} and its contents")
                 shutil.rmtree(vmm_dir)
                 if self._config.verbose:
                     self._logger.info(f"Directory {vmm_dir} is removed")
@@ -377,13 +379,14 @@ class VMMManager:
 
         for id in ids:
             self.cleanup(id)
+            if self._config.verbose:
+                self._logger.info(f"Removed VMM {id}")
+
+        return f"VMM {id} removed"
 
     def cleanup(self, id=None):
         """Clean up network and process resources for a VMM."""
         try:
-            if self._config.verbose:
-                self._logger.info(f"Cleaning up VMM {id}")
-
             self._process.cleanup_screen_session(f"fc_{id}")
             self._network.cleanup(f"tap_{id}")
             self.delete_vmm_dir(id)
