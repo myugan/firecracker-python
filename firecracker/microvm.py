@@ -59,7 +59,7 @@ class MicroVM:
             raise ValueError("Cannot specify both user_data and user_data_file. Use only one of them.")
         if user_data_file:
             if not os.path.exists(user_data_file):
-                raise ValueError(f"User data file not found: {user_data_file}")
+                print(f"User data file not found: {user_data_file}")
             with open(user_data_file, 'r') as f:
                 self._user_data = f.read()
         else:
@@ -70,9 +70,13 @@ class MicroVM:
         self._iface_name = self._network.get_interface_name()
         self._host_dev_name = f"tap_{self._microvm_id}"
         self._mac_addr = generate_mac_address()
-        self._ip_addr = self._config.ip_addr if not ip_addr else validate_ip_address(ip_addr)
-        if self._network.detect_cidr_conflict(self._ip_addr, 24):
-            self._ip_addr = self._network.suggest_ip_address(self._ip_addr, 24)
+        if ip_addr:
+            validate_ip_address(ip_addr)
+            self._ip_addr = ip_addr
+            if self._network.detect_cidr_conflict(self._ip_addr, 24):
+                self._ip_addr = self._network.suggest_non_conflicting_ip(self._ip_addr, 24)
+        else:
+            self._ip_addr = self._config.ip_addr
         self._gateway_ip = self._network.get_gateway_ip(self._ip_addr)
         self._bridge = bridge if bridge is not None else self._config.bridge
         self._bridge_name = bridge_name or self._config.bridge_name
@@ -83,9 +87,13 @@ class MicroVM:
         self._rootfs_dir = f"{self._vmm_dir}/rootfs"
 
         self._kernel_file = kernel_file or self._config.kernel_file
+        if not os.path.exists(self._kernel_file):
+            print(f"Kernel file not found: {self._kernel_file}")
         self._initrd_file = initrd_file or self._config.initrd_file
+        if self._initrd_file:
+            if not os.path.exists(self._initrd_file):
+                print(f"Initrd file not found: {self._initrd_file}")
         self._init_file = init_file or self._config.init_file
-
         if rootfs_url:
             self._base_rootfs = self._download_rootfs(rootfs_url)
         else:
@@ -620,7 +628,7 @@ class MicroVM:
             boot_response = self._api.boot.put(**boot_params)
 
             if self._config.verbose:
-                self._logger.debug(f"Boot configuration response: {boot_response}")
+                self._logger.debug(f"Boot configuration response: {boot_response.status_code}")
                 self._logger.info("Boot source configured")
 
         except Exception as e:
@@ -673,14 +681,15 @@ class MicroVM:
             NetworkError: If network configuration fails
         """
         try:
-            self._api.network.put(
+            response = self._api.network.put(
                 iface_id=self._iface_name,
                 guest_mac=self._mac_addr,
                 host_dev_name=self._host_dev_name
             )
 
             if self._config.verbose:
-                self._logger.info("Network configuration complete")
+                self._logger.debug(f"Network configuration response: {response.status_code}")
+                self._logger.info("Configured network interface")
 
         except Exception as e:
             raise ConfigurationError(f"Failed to configure network: {str(e)}")
@@ -720,7 +729,7 @@ class MicroVM:
             mmds_data_response = self._api.mmds.put(**user_data)
 
             if self._config.verbose:
-                self._logger.debug(f"MMDS data response: {mmds_data_response}")
+                self._logger.debug(f"MMDS data response: {mmds_data_response.status_code}")
                 self._logger.info("MMDS data configured")
 
         except Exception as e:
@@ -738,7 +747,7 @@ class MicroVM:
             if not self._overlayfs:
                 run(f"cp {self._base_rootfs} {self._rootfs_file}")
                 if self._config.verbose:
-                    self._logger.info(f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}")
+                    self._logger.debug(f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}")
 
             for log_file in [f"{self._microvm_id}.log", f"{self._microvm_id}_screen.log"]:
                 self._vmm.create_log_file(self._microvm_id, log_file)
@@ -769,7 +778,7 @@ class MicroVM:
                     pass
                 time.sleep(0.5)
 
-            raise APIError("Failed to connect to the API socket - API not responding with 200")
+            raise APIError(f"Error {response.status_code}: Failed to connect to the API socket")
 
         except Exception as exc:
             self._vmm.cleanup(self._microvm_id)
