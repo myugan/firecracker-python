@@ -448,20 +448,17 @@ class NetworkManager:
                     expr = rule.get('expr', [])
                     has_saddr_match = False
                     has_masquerade = False
+                    comment = rule.get('comment', '')
 
                     for e in expr:
                         if 'match' in e and e['match']['op'] == '==' and \
                             'payload' in e['match']['left'] and e['match']['left']['payload']['field'] == 'saddr':
-                            if e['match']['right'] == dest_ip or \
-                               (isinstance(e['match']['right'], dict) and
-                                'prefix' in e['match']['right'] and
-                                e['match']['right']['prefix']['addr'] == dest_ip):
-                                has_saddr_match = True
+                            has_saddr_match = True
 
                         if 'masquerade' in e:
                             has_masquerade = True
 
-                    if has_saddr_match and has_masquerade:
+                    if has_saddr_match and has_masquerade and comment == f"machine_id={id}":
                         if self._config.verbose:
                             self._logger.debug(f"Found matching postrouting masquerade rule {rule}")
                             self._logger.info(f"Found postrouting rule with handle {rule['handle']}")
@@ -496,7 +493,8 @@ class NetworkManager:
             output = self._nft.json_cmd(list_cmd)
             result = output[1]['nftables']
             rules = {}
-            expected_comment = f"machine_id={id} host_port={host_port}"
+            prerouting_comment = f"machine_id={id} host_port={host_port}"
+            postrouting_comment = f"machine_id={id}"
 
             for item in result:
                 if 'rule' not in item:
@@ -508,31 +506,18 @@ class NetworkManager:
 
                 # Check for PREROUTING rules with matching comment
                 if rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'PREROUTING':
-                    if comment == expected_comment:
+                    if comment == prerouting_comment:
                         if self._config.verbose:
                             self._logger.info(f"Found prerouting rule with matching comment: {comment}")
                             self._logger.debug(f"Rule details: {rule}")
                         rules['prerouting'] = rule['handle']
 
-                # Check for POSTROUTING rules (for the same machine)
+                # Check for POSTROUTING rules with matching comment
                 elif rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'POSTROUTING':
-                    expr = rule.get('expr', [])
-                    has_saddr_match = False
-                    has_masquerade = False
-
-                    for e in expr:
-                        if 'match' in e and e['match']['op'] == '==' and \
-                            'payload' in e['match']['left'] and e['match']['left']['payload']['field'] == 'saddr':
-                            if isinstance(e['match']['right'], dict) and 'prefix' in e['match']['right']:
-                                has_saddr_match = True
-
-                        if 'masquerade' in e:
-                            has_masquerade = True
-
-                    if has_saddr_match and has_masquerade:
+                    if comment == postrouting_comment:
                         if self._config.verbose:
-                            self._logger.debug(f"Found matching postrouting masquerade rule {rule}")
-                            self._logger.info(f"Found postrouting rule with handle {rule['handle']}")
+                            self._logger.info(f"Found postrouting rule with matching comment: {comment}")
+                            self._logger.debug(f"Rule details: {rule}")
                         rules['postrouting'] = rule['handle']
 
             if not rules and self._config.verbose:
@@ -650,6 +635,7 @@ class NetworkManager:
                             "family": "ip",
                             "table": "nat",
                             "chain": "POSTROUTING",
+                            "comment": f"machine_id={id}",
                             "expr": [
                                 {
                                     "match": {
