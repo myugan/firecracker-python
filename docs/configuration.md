@@ -40,6 +40,8 @@ The `MicroVMConfig` class is a dataclass that defines default configuration valu
 
 ## Using Custom Configuration
 
+> Floating point numbers cannot be used for vcpu configuration as it will result in a `SerdeJson(Error("invalid type: floating point `0.2`, expected u8", line: 1, column: 18))` error
+
 When creating a microVM, you can override the default configuration by passing parameters to the MicroVM constructor:
 
 ```python
@@ -49,9 +51,7 @@ from firecracker import MicroVM
 vm = MicroVM(
     vcpu=2,
     memory=1024,
-    ip_addr="192.168.100.2",
-    bridge=True,
-    bridge_name="br0"
+    ip_addr="192.168.100.2"
 )
 
 vm.create()
