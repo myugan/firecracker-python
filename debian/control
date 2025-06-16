@@ -1,0 +1,26 @@
+Source: firecracker-python
+Section: python
+Priority: optional
+Maintainer: Muhammad Yuga Nugraha <myugan59@gmail.com>
+Standards-Version: 4.6.2
+Build-Depends: debhelper (>= 11), dh-python, python3-all, python3-setuptools, curl, jq
+
+Package: python3-firecracker
+Architecture: all
+Depends: ${python3:Depends}, ${misc:Depends}, 
+         python3-requests (>= 2.25.1),
+         python3-requests-unixsocket,
+         python3-tenacity,
+         python3-psutil,
+         python3-nftables,
+         python3-pyroute2,
+         python3-paramiko,
+         iproute2
+Description: Python client library for Firecracker microVMs
+ This package provides a Python client library for interacting with
+ Firecracker microVMs. It includes functionality for:
+ .
+  * Creating and managing microVMs
+  * Configuring network interfaces
+  * Managing VM resources
+  * Handling VM lifecycle operations
