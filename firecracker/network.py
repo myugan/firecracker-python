@@ -297,7 +297,7 @@ class NetworkManager:
 
         if not output[0]:
             result = output[1]['nftables']
-            expected_comment = f"microVM outbound NAT"
+            expected_comment = "microVM outbound NAT"
 
             for item in result:
                 if 'rule' not in item:
@@ -350,7 +350,7 @@ class NetworkManager:
                                 "family": "ip",
                                 "table": "nat",
                                 "chain": "POSTROUTING",
-                                "comment": f"microVM outbound NAT",
+                                "comment": "microVM outbound NAT",
                                 "expr": [
                                     {
                                         "match": {

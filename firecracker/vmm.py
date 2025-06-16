@@ -394,7 +394,7 @@ class VMMManager:
         except Exception as e:
             raise VMMError(f"Failed to cleanup VMM {id}: {str(e)}") from e
 
-    def _ensure_socket_file(self, vmm_id: str) -> str:
+    def socket_file(self, id: str) -> str:
         """Ensure the socket file is ready for use, unlinking if necessary.
 
         Returns:
@@ -404,7 +404,7 @@ class VMMManager:
             VMMError: If unable to create or verify the socket file
         """
         try:
-            socket_file = f"{self._config.data_path}/{vmm_id}/firecracker.socket"
+            socket_file = f"{self._config.data_path}/{id}/firecracker.socket"
 
             if os.path.exists(socket_file):
                 os.unlink(socket_file)
@@ -413,7 +413,7 @@ class VMMManager:
                         f"Unlinked existing socket file {socket_file}"
                     )
 
-            self.create_vmm_dir(f"{self._config.data_path}/{vmm_id}")
+            self.create_vmm_dir(f"{self._config.data_path}/{id}")
             return socket_file
 
         except OSError as e:

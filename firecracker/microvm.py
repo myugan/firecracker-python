@@ -10,7 +10,7 @@ import requests
 import paramiko.ssh_exception
 from http import HTTPStatus
 from paramiko import SSHClient, AutoAddPolicy
-from typing import Tuple, List, Dict
+from typing import List, Dict
 from contextlib import closing
 from firecracker.config import MicroVMConfig
 from firecracker.api import Api
@@ -48,12 +48,11 @@ class MicroVM:
         self._vmm = VMMManager(verbose=verbose, level=level)
 
         self._vcpu = vcpu or self._config.vcpu
+        if not isinstance(self._vcpu, int) or self._vcpu <= 0:
+            print("vcpu must be a positive integer")
         self._memory = int(self._convert_memory_size(memory or self._config.memory))
         self._mmds_enabled = mmds_enabled if mmds_enabled is not None else self._config.mmds_enabled
         self._mmds_ip = mmds_ip or self._config.mmds_ip
-
-        if not isinstance(self._vcpu, (int, float)) or self._vcpu <= 0:
-            raise ValueError("vcpu must be a positive number")
 
         if user_data_file and user_data:
             raise ValueError("Cannot specify both user_data and user_data_file. Use only one of them.")
@@ -218,8 +217,12 @@ class MicroVM:
             )
 
             self._run_firecracker()
-            if not self._basic_config():
-                return "Failed to configure VMM"
+            self._configure_vmm_boot_source()
+            self._configure_vmm_root_drive()
+            self._configure_vmm_network()
+            if self._mmds_enabled:
+                self._configure_vmm_mmds()
+            self._configure_vmm_resources()
 
             self._api.actions.put(action_type="InstanceStart")
 
@@ -570,35 +573,11 @@ class MicroVM:
 
         return []
 
-    def _basic_config(self) -> bool:
-        """Configure the microVM with basic settings.
-
-        This method orchestrates the configuration of various components:
-        - Boot source
-        - Root drive
-        - Machine resources (vCPUs and memory)
-        - Network interface
-        - MMDS (if enabled)
-
-        Returns:
-            bool: True if configuration is successful, False otherwise.
-        """
-        try:
-            self._configure_vmm_boot_source()
-            self._configure_vmm_root_drive()
-            self._configure_vmm_resources()
-            self._configure_vmm_network()
-            if self._mmds_enabled:
-                self._configure_vmm_mmds()
-            return True
-        except Exception as exc:
-            raise ConfigurationError(str(exc))
-
     @property
     def _boot_args(self):
         """Generate boot arguments using current configuration."""
         common_args = (
-            "console=ttyS0 reboot=k panic=1 "
+            "console=ttyS0 reboot=k panic=1 nomodules "
             f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
             f"{self._microvm_name}:{self._iface_name}:on"
         )
@@ -683,7 +662,6 @@ class MicroVM:
         try:
             response = self._api.network.put(
                 iface_id=self._iface_name,
-                guest_mac=self._mac_addr,
                 host_dev_name=self._host_dev_name
             )
 
@@ -735,10 +713,10 @@ class MicroVM:
         except Exception as e:
             raise ConfigurationError(f"Failed to configure MMDS: {str(e)}")
 
-    def _run_firecracker(self) -> Tuple[Api, int]:
+    def _run_firecracker(self):
         """Start a new Firecracker process using screen."""
         try:
-            self._vmm._ensure_socket_file(self._microvm_id)
+            self._vmm.socket_file(self._microvm_id)
 
             paths = [self._vmm_dir, f"{self._vmm_dir}/rootfs", f"{self._vmm_dir}/logs"]
             for path in paths:

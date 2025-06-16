@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export PYBUILD_NAME = firecracker-python
+
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+override_dh_auto_install:
+	dh_auto_install
+	dh_python3 -p python3-firecracker
+
+override_dh_install:
+	dh_install
+
+override_dh_auto_build:
+	dh_auto_build
