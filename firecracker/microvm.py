@@ -10,7 +10,7 @@ import requests
 import paramiko.ssh_exception
 from http import HTTPStatus
 from paramiko import SSHClient, AutoAddPolicy
-from typing import Tuple, List, Dict
+from typing import List, Dict
 from contextlib import closing
 from firecracker.config import MicroVMConfig
 from firecracker.api import Api
