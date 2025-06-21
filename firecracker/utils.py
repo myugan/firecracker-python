@@ -6,6 +6,7 @@ import requests
 import subprocess
 import socket
 from faker import Faker
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 
 def run(cmd, **kwargs):
@@ -145,8 +146,41 @@ def validate_ip_address(ip_addr: str) -> bool:
         raise Exception(f"Invalid IP address: {ip_addr}")
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(1),
+    retry=retry_if_exception_type(requests.RequestException)
+)
+def _try_get_ip_from_url(url: str, timeout: int = 5) -> str:
+    """Try to get public IP from a specific URL with retry logic.
+    
+    Args:
+        url (str): URL to try for getting public IP
+        timeout (int): Request timeout in seconds
+        
+    Returns:
+        str: Public IP address
+        
+    Raises:
+        requests.RequestException: If all retry attempts fail
+    """
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response.text.strip()
+
+
 def get_public_ip(timeout: int = 5):
-    """Get the public IP address."""
+    """Get the public IP address by trying multiple services.
+    
+    Args:
+        timeout (int): Request timeout in seconds
+        
+    Returns:
+        str: Public IP address
+        
+    Raises:
+        RuntimeError: If all services fail to return a valid IP
+    """
     URLS = [
         "https://ifconfig.me",
         "https://ipinfo.io/ip",
@@ -155,9 +189,7 @@ def get_public_ip(timeout: int = 5):
 
     for url in URLS:
         try:
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-            return response.text.strip()
+            return _try_get_ip_from_url(url, timeout)
         except requests.RequestException:
             continue
 
