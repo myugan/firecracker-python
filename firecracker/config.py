@@ -8,13 +8,14 @@ class MicroVMConfig:
     data_path: str = "/var/lib/firecracker"
     binary_path: str = "/usr/local/bin/firecracker"
     kernel_file: str = os.path.join(data_path, "vmlinux")
+    rootfs_size: str = "5G"
     initrd_file: str = None
     init_file: str = "/sbin/init"
     base_rootfs: str = None
     overlayfs: bool = False
     overlayfs_file: str = None
     ip_addr: str = "172.16.0.2"
-    bridge: bool = False
+    bridge: bool = True
     bridge_name: str = "docker0"
     mmds_enabled: bool = False
     mmds_ip: str = "169.254.169.254"
