@@ -1,17 +1,17 @@
 import os
 import sys
+import tty
 import time
 import json
-import psutil
 import select
 import termios
-import tty
-import requests
-import paramiko.ssh_exception
+import docker
+import tarfile
+import tempfile
 from http import HTTPStatus
-from paramiko import SSHClient, AutoAddPolicy
+from paramiko import SSHClient, AutoAddPolicy, SSHException
 from typing import List, Dict
-from contextlib import closing
+from tenacity import retry, stop_after_attempt, stop_after_delay, wait_fixed, retry_if_exception_type
 from firecracker.config import MicroVMConfig
 from firecracker.api import Api
 from firecracker.logger import Logger
@@ -19,7 +19,7 @@ from firecracker.network import NetworkManager
 from firecracker.process import ProcessManager
 from firecracker.vmm import VMMManager
 from firecracker.utils import run, get_public_ip, validate_ip_address, generate_id, generate_name, generate_mac_address
-from firecracker.exceptions import APIError, VMMError, ConfigurationError, ProcessError
+from firecracker.exceptions import APIError, VMMError, ConfigurationError
 
 
 class MicroVM:
@@ -29,7 +29,7 @@ class MicroVM:
         id (str, optional): ID for the MicroVM
     """
     def __init__(self, name: str = None, kernel_file: str = None, initrd_file: str = None, init_file: str = None,
-                 base_rootfs: str = None, rootfs_url: str = None, overlayfs: bool = False, overlayfs_file: str = None,
+                 image: str = None, base_rootfs: str = None, rootfs_size: str = None, overlayfs: bool = False, overlayfs_file: str = None,
                  vcpu: int = None, memory: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None,
                  mmds_enabled: bool = None, mmds_ip: str = None, user_data: str = None, user_data_file: str = None,
                  labels: dict = None, expose_ports: bool = False, host_port: int = None, dest_port: int = None,
@@ -93,13 +93,28 @@ class MicroVM:
             if not os.path.exists(self._initrd_file):
                 print(f"Initrd file not found: {self._initrd_file}")
         self._init_file = init_file or self._config.init_file
-        if rootfs_url:
-            self._base_rootfs = self._download_rootfs(rootfs_url)
-        else:
-            self._base_rootfs = base_rootfs or self._config.base_rootfs
-        base_rootfs_name = os.path.basename(self._base_rootfs.replace('./', ''))
-        self._rootfs_file = os.path.join(self._rootfs_dir, base_rootfs_name)
 
+        self._docker = docker.from_env()
+        self._docker_image = image
+
+        if image:
+            if not self._is_valid_docker_image(image):
+                print(f"Invalid Docker image: {image}")
+            self._base_rootfs = base_rootfs
+        elif base_rootfs:
+            if not os.path.exists(base_rootfs):
+                print(f"Base rootfs file not found: {base_rootfs}")
+            self._base_rootfs = base_rootfs
+        else:
+            self._base_rootfs = self._config.base_rootfs
+            if not os.path.exists(self._base_rootfs):
+                print(f"Default rootfs file not found: {self._base_rootfs}")
+
+        if self._base_rootfs:
+            base_rootfs_name = os.path.basename(self._base_rootfs.replace('./', ''))
+            self._rootfs_file = os.path.join(self._rootfs_dir, base_rootfs_name)
+
+        self._rootfs_size = self._config.rootfs_size or rootfs_size
         self._overlayfs = overlayfs or self._config.overlayfs
         if self._overlayfs:
             self._overlayfs_file = overlayfs_file or os.path.join(self._rootfs_dir, "overlayfs.ext4")
@@ -199,7 +214,29 @@ class MicroVM:
         except Exception as e:
             raise VMMError(f"Failed to get status for VMM {id}: {str(e)}")
 
+    def build(self):
+        """Build the rootfs from the Docker image.
+
+        Returns:
+            str: Status message indicating the result of the build operation.
+        """
+        try:
+            if not self._docker_image:
+                return "No Docker image specified for building rootfs"
+
+            self._build_rootfs(self._docker_image, self._base_rootfs, self._rootfs_size)
+
+            return f"Rootfs built at {self._base_rootfs}"
+
+        except Exception as e:
+            raise VMMError(f"Failed to build rootfs from Docker image: {str(e)}")
+
     def create(self) -> dict:
+        """Create a new microVM.
+
+        Returns:
+            dict: Status message indicating the result of the create operation.
+        """
         vmm_dir = f"{self._config.data_path}/{self._microvm_id}"
         if os.path.exists(vmm_dir):
             return f"VMM with ID {self._microvm_id} already exists"
@@ -207,6 +244,12 @@ class MicroVM:
         try:
             if self._vmm.check_network_overlap(self._ip_addr):
                 return f"IP address {self._ip_addr} is already in use"
+
+            if self._docker_image:
+                if not os.path.exists(self._base_rootfs):
+                    if self._config.verbose:
+                        self._logger.info(f"Building rootfs from Docker image: {self._docker_image}")
+                    self._build_rootfs(self._docker_image, self._base_rootfs, self._rootfs_size)
 
             self._network.setup(
                 tap_name=self._host_dev_name,
@@ -219,10 +262,10 @@ class MicroVM:
             self._run_firecracker()
             self._configure_vmm_boot_source()
             self._configure_vmm_root_drive()
+            self._configure_vmm_resources()
             self._configure_vmm_network()
             if self._mmds_enabled:
                 self._configure_vmm_mmds()
-            self._configure_vmm_resources()
 
             self._api.actions.put(action_type="InstanceStart")
 
@@ -414,24 +457,7 @@ class MicroVM:
             with open(f"{self._config.data_path}/{id}/config.json", "r") as f:
                 ip_addr = json.load(f)['Network'][f"tap_{id}"]['IPAddress']
 
-            max_retries = 3
-            retries = 0
-            while retries < max_retries:
-                try:
-                    self._ssh_client.set_missing_host_key_policy(AutoAddPolicy())
-                    self._ssh_client.connect(
-                        hostname=ip_addr,
-                        username=username if username else self._config.ssh_user,
-                        key_filename=key_path
-                    )
-                    break
-                except paramiko.ssh_exception.NoValidConnectionsError as e:
-                    retries += 1
-                    if retries >= max_retries:
-                        raise VMMError(
-                            f"Unable to connect to the VMM {id} via SSH after {max_retries} attempts: {str(e)}"
-                        )
-                    time.sleep(2)
+            self._establish_ssh_connection(ip_addr, username, key_path, id)
 
             if self._config.verbose:
                 self._logger.info(f"Attempting SSH connection to {ip_addr} with user {self._config.ssh_user}")
@@ -616,9 +642,15 @@ class MicroVM:
     def _configure_vmm_root_drive(self):
         """Configure the root drive for the microVM."""
         try:
+            # For overlayfs, use base_rootfs if available, otherwise use rootfs_file
+            # For Docker images, base_rootfs might be None, so use rootfs_file
+            rootfs_path = self._rootfs_file
+            if self._overlayfs and self._base_rootfs:
+                rootfs_path = self._base_rootfs
+            
             self._api.drive.put(
                 drive_id="rootfs",
-                path_on_host=self._rootfs_file if not self._overlayfs else self._base_rootfs,
+                path_on_host=rootfs_path,
                 is_root_device=True,
                 is_read_only=self._overlayfs is True
             )
@@ -722,7 +754,7 @@ class MicroVM:
             for path in paths:
                 self._vmm.create_vmm_dir(path)
 
-            if not self._overlayfs:
+            if not self._overlayfs and self._base_rootfs and os.path.exists(self._base_rootfs):
                 run(f"cp {self._base_rootfs} {self._rootfs_file}")
                 if self._config.verbose:
                     self._logger.debug(f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}")
@@ -743,49 +775,34 @@ class MicroVM:
                 binary_path=self._config.binary_path,
                 binary_params=binary_params
             )
-            
-            if not psutil.pid_exists(int(screen_pid)):
-                raise ProcessError("Firecracker process is not running")
 
-            for _ in range(3):
-                try:
-                    response = self._api.describe.get()
-                    if response.status_code == HTTPStatus.OK:
-                        return Api(self._socket_file)
-                except Exception:
-                    pass
-                time.sleep(0.5)
+            self._process._wait_for_process_start(screen_pid)
 
-            raise APIError(f"Error {response.status_code}: Failed to connect to the API socket")
+            return self._wait_for_api_connection()
 
         except Exception as exc:
             self._vmm.cleanup(self._microvm_id)
             raise VMMError(str(exc))
 
-    def _download_rootfs(self, url: str):
-        """Download the rootfs from the given URL."""
-
-        if not url.startswith(("http://", "https://")):
-            raise VMMError(f"Invalid URL: {url}")
-
-        try:
-            with closing(requests.get(url, stream=True, timeout=10)) as response:
-                response.raise_for_status()
-
-                if self._config.verbose:
-                    self._logger.info(f"Downloading rootfs from {url}")
-
-                filename = url.split("/")[-1]
-                path = os.path.join(self._config.data_path, filename)
-
-                with open(path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-
-                return path
-
-        except Exception as e:
-            raise VMMError(f"Failed to download rootfs from {url}: {str(e)}")
+    @retry(
+        stop=stop_after_delay(3),
+        wait=wait_fixed(0.5),
+        retry=retry_if_exception_type(Exception)
+    )
+    def _wait_for_api_connection(self):
+        """Wait for the Firecracker API to become available.
+        
+        Returns:
+            Api: The API instance when connection is successful
+            
+        Raises:
+            APIError: If connection fails after all retry attempts
+        """
+        response = self._api.describe.get()
+        if response.status_code == HTTPStatus.OK:
+            return Api(self._socket_file)
+        else:
+            raise APIError(f"Error {response.status_code}: Failed to connect to the API socket")
 
     def _convert_memory_size(self, size):
         """Convert memory size to MiB.
@@ -818,3 +835,163 @@ class MicroVM:
             except ValueError:
                 raise ValueError(f"Invalid memory size format: {size}")
         raise ValueError(f"Invalid memory size type: {type(size)}")
+
+    def _is_valid_docker_image(self, image_name):
+        """
+        Check if a Docker image is valid using Docker module only
+        
+        Args:
+            image_name (str): Docker image name (e.g., 'alpine', 'nginx:latest')
+        
+        Returns:
+            bool: True if image exists in registry, False otherwise
+        """
+        try:
+            self._docker.api.inspect_distribution(image_name)
+            return True
+            
+        except Exception:
+            return False
+
+    def _download_docker(self, image: str) -> str:
+        """Download a Docker image and extract its root filesystem.
+        
+        Args:
+            image (str): Docker image name (e.g., 'ubuntu:24.04', 'alpine:latest')
+            
+        Returns:
+            str: Docker image tag or ID
+            
+        Raises:
+            VMMError: If Docker operations fail
+        """
+        try:
+            local = self._docker.images.get(image)
+            if self._config.verbose:
+                self._logger.info(f"Docker image {image} already exists")
+            if local.tags:
+                return local.tags[0]
+            else:
+                return local.id
+
+        except docker.errors.ImageNotFound:
+            if self._config.verbose:
+                self._logger.info(f"Pulling Docker image: {image}")
+
+            pulled = self._docker.images.pull(image)
+
+            if pulled.tags:
+                return pulled.tags[0]
+            else:
+                raise VMMError(f"Failed to pull Docker image {image}")
+
+        except Exception as e:
+            raise VMMError(f"Unexpected error: {e}")
+
+    def _export_docker_image(self, image: str) -> str:
+        """
+        Export Docker image to a tar file
+        
+        Args:
+            image (str): Docker image name (e.g., 'alpine', 'ubuntu:20.04')
+            
+        Returns:
+            str: Path to the exported tar file
+        """
+        container_name = image.split('/')[-1]
+        tar_file = f"{self._config.data_path}/rootfs_{container_name}.tar"
+
+        try:
+            if not image:
+                raise VMMError(f"Failed to download Docker image {image}")
+
+            if self._config.verbose:
+                self._logger.debug(f"Creating container: {container_name}")
+            
+            container = self._docker.containers.create(image, name=container_name)
+            export_data = container.export()
+
+            if self._config.verbose:
+                self._logger.debug(f"Exporting container to {tar_file}")
+
+            with open(tar_file, 'wb') as f:
+                for chunk in export_data:
+                    f.write(chunk)
+
+            container.remove(force=True)
+            
+            if self._config.verbose:
+                self._logger.debug(f"Successfully exported container to {tar_file}")
+
+            return tar_file
+                
+        except (docker.errors.ImageNotFound, docker.errors.APIError) as e:
+            raise VMMError(f"Docker error: {e}")
+        except Exception as e:
+            raise VMMError(f"Unexpected error: {e}")
+
+    def _build_rootfs(self, image: str, file: str, size: str):
+        """Create a filesystem image from a tar file.
+        
+        Args:
+            image (str): Docker image name
+            file (str): Path to the output image file
+            size (str): Size of the image file
+
+        Returns:
+            str: Path to the created image file
+        """
+        tmp_dir = None
+        try:
+            self._download_docker(image)
+            tar_file = self._export_docker_image(image)
+
+            if not tar_file or not os.path.exists(tar_file):
+                return f"Failed to export Docker image {image}"
+
+            run(f"fallocate -l {size} {file}")
+            if self._config.verbose:
+                self._logger.debug(f"Image file created: {file}")
+
+            run(f"mkfs.ext4 {file}")
+            if self._config.verbose:
+                self._logger.debug(f"Formatting filesystem: {file} with size {size}")
+
+            tmp_dir = tempfile.mkdtemp()
+            run(f"mount -o loop {file} {tmp_dir}")
+
+            with tarfile.open(tar_file, 'r') as tar:
+                tar.extractall(path=tmp_dir)
+
+            if self._config.verbose:
+                self._logger.info("Build rootfs completed")
+
+        except Exception as e:
+            if tmp_dir:
+                run(f"umount {tmp_dir}", "unmounting")
+                os.rmdir(tmp_dir)
+            raise VMMError(f"Failed to create image file: {e}")
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(2),
+        retry=retry_if_exception_type(SSHException)
+    )
+    def _establish_ssh_connection(self, ip_addr: str, username: str, key_path: str, id: str):
+        """Establish SSH connection to the VMM with retry logic.
+        
+        Args:
+            ip_addr (str): IP address of the VMM
+            username (str): SSH username
+            key_path (str): Path to SSH private key
+            id (str): VMM ID for error messages
+            
+        Raises:
+            VMMError: If connection fails after all retry attempts
+        """
+        self._ssh_client.set_missing_host_key_policy(AutoAddPolicy())
+        self._ssh_client.connect(
+            hostname=ip_addr,
+            username=username if username else self._config.ssh_user,
+            key_filename=key_path
+        )
