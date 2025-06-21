@@ -20,6 +20,7 @@ class NetworkManager:
         self._config.verbose = verbose
         self._nft = Nftables()
         self._nft.set_json_output(True)
+        self._ipr = IPRoute()
         self._logger = Logger(level=level, verbose=verbose)
 
     def get_interface_name(self) -> str:
@@ -130,23 +131,22 @@ class NetworkManager:
             NetworkError: If checking the bridge device fails.
         """
         try:
-            with IPRoute() as ipr:
-                links = ipr.link_lookup(ifname=bridge_name)
-                if not links:
-                    if self._config.verbose:
-                        self._logger.info(f"Bridge device {bridge_name} not found")
-                    return False
-
-                link_info = ipr.get_links(links[0])[0]
-                for attr_name, attr_value in link_info.get('attrs', []):
-                    if attr_name == 'IFLA_LINKINFO':
-                        for info_attr_name, info_attr_value in attr_value.get('attrs', []):
-                            if info_attr_name == 'IFLA_INFO_KIND' and info_attr_value == 'bridge':
-                                if self._config.verbose:
-                                    self._logger.info(f"Bridge device {bridge_name} exists")
-                                return True
-
+            links = self._ipr.link_lookup(ifname=bridge_name)
+            if not links:
+                if self._config.verbose:
+                    self._logger.info(f"Bridge device {bridge_name} not found")
                 return False
+
+            link_info = self._ipr.get_links(links[0])[0]
+            for attr_name, attr_value in link_info.get('attrs', []):
+                if attr_name == 'IFLA_LINKINFO':
+                    for info_attr_name, info_attr_value in attr_value.get('attrs', []):
+                        if info_attr_name == 'IFLA_INFO_KIND' and info_attr_value == 'bridge':
+                            if self._config.verbose:
+                                self._logger.info(f"Bridge device {bridge_name} exists")
+                            return True
+
+            return False
 
         except Exception as e:
             raise NetworkError(f"Failed to check bridge device {bridge_name}: {str(e)}")
@@ -164,12 +164,11 @@ class NetworkManager:
             NetworkError: If checking the tap device fails.
         """
         try:
-            with IPRoute() as ipr:
-                links = ipr.link_lookup(ifname=tap_device_name)
-                if not bool(links):
-                    return False
-                else:
-                    return True
+            links = self._ipr.link_lookup(ifname=tap_device_name)
+            if not bool(links):
+                return False
+            else:
+                return True
 
         except Exception as e:
             raise NetworkError(f"Failed to check tap device {tap_device_name}: {str(e)}")
@@ -867,32 +866,31 @@ class NetworkManager:
         try:
             new_network = IPv4Network(f"{ip_addr}/{prefix_len}", strict=False)
 
-            with IPRoute() as ipr:
-                interfaces = ipr.get_links()
+            interfaces = self._ipr.get_links()
+            
+            for interface in interfaces:
+                idx = interface['index']
+                addresses = self._ipr.get_addr(index=idx)
                 
-                for interface in interfaces:
-                    idx = interface['index']
-                    addresses = ipr.get_addr(index=idx)
-                    
-                    for addr in addresses:
-                        for attr_name, attr_value in addr.get('attrs', []):
-                            if attr_name == 'IFA_ADDRESS':
-                                if ':' in attr_value:
-                                    continue
-                                
-                                existing_prefix = addr.get('prefixlen', 24)
-                                existing_network = IPv4Network(
-                                    f"{attr_value}/{existing_prefix}", 
-                                    strict=False
-                                )
+                for addr in addresses:
+                    for attr_name, attr_value in addr.get('attrs', []):
+                        if attr_name == 'IFA_ADDRESS':
+                            if ':' in attr_value:
+                                continue
+                            
+                            existing_prefix = addr.get('prefixlen', 24)
+                            existing_network = IPv4Network(
+                                f"{attr_value}/{existing_prefix}", 
+                                strict=False
+                            )
 
-                                if new_network.overlaps(existing_network):
-                                    if self._config.verbose:
-                                        self._logger.warn(
-                                            f"CIDR conflict detected: {new_network} "
-                                            f"overlaps with existing {existing_network}"
-                                        )
-                                    return True
+                            if new_network.overlaps(existing_network):
+                                if self._config.verbose:
+                                    self._logger.warn(
+                                        f"CIDR conflict detected: {new_network} "
+                                        f"overlaps with existing {existing_network}"
+                                    )
+                                return True
             return False
             
         except (AddressValueError, ValueError) as e:
@@ -953,16 +951,15 @@ class NetworkManager:
                 raise ValueError("Interface name must not exceed 16 characters")
 
         try:
-            with IPRoute() as ipr:
-                ipr.link('add', ifname=tap_name, kind='tuntap', mode='tap')
-                idx = ipr.link_lookup(ifname=tap_name)[0]
-                if gateway_ip:
-                    ipr.addr('add', index=idx, address=gateway_ip, prefixlen=24)
+            self._ipr.link('add', ifname=tap_name, kind='tuntap', mode='tap')
+            idx = self._ipr.link_lookup(ifname=tap_name)[0]
+            if gateway_ip:
+                self._ipr.addr('add', index=idx, address=gateway_ip, prefixlen=24)
 
-                ipr.link('set', index=idx, state='up')
-                
-                if self._config.verbose:
-                    self._logger.debug(f"Created TAP device {tap_name}")
+            self._ipr.link('set', index=idx, state='up')
+            
+            if self._config.verbose:
+                self._logger.debug(f"Created TAP device {tap_name}")
 
         except Exception as e:
             self.cleanup(tap_name)
@@ -976,12 +973,11 @@ class NetworkManager:
             bridge_name (str): Name of the bridge to attach the tap device to.
         """
         try:
-            with IPRoute() as ipr:
-                bridge_idx = ipr.link_lookup(ifname=bridge_name)[0]
-                idx = ipr.link_lookup(ifname=iface_name)[0]
-                ipr.link('set', index=idx, master=bridge_idx)
-                if self._config.verbose:
-                    self._logger.info(f"Attached tap device {iface_name} to bridge {bridge_name}")
+            bridge_idx = self._ipr.link_lookup(ifname=bridge_name)[0]
+            idx = self._ipr.link_lookup(ifname=iface_name)[0]
+            self._ipr.link('set', index=idx, master=bridge_idx)
+            if self._config.verbose:
+                self._logger.info(f"Attached tap device {iface_name} to bridge {bridge_name}")
 
             return True
 
@@ -997,12 +993,11 @@ class NetworkManager:
             name (str): Name of the tap device to clean up.
         """
         try:
-            with IPRoute() as ipr:
-                if self.check_tap_device(name):
-                    idx = ipr.link_lookup(ifname=name)[0]
-                    ipr.link('del', index=idx)
-                    if self._config.verbose:
-                        self._logger.info(f"Removed tap device {name}")
+            if self.check_tap_device(name):
+                idx = self._ipr.link_lookup(ifname=name)[0]
+                self._ipr.link('del', index=idx)
+                if self._config.verbose:
+                    self._logger.info(f"Removed tap device {name}")
             return True
 
         except Exception as e:
