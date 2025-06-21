@@ -1,3 +1,4 @@
+import os
 import re
 import time
 import psutil
@@ -8,6 +9,7 @@ from firecracker.utils import run, safe_kill
 from firecracker.logger import Logger
 from firecracker.config import MicroVMConfig
 from firecracker.exceptions import ProcessError
+from tenacity import retry, stop_after_delay, wait_fixed, retry_if_exception_type
 
 
 class ProcessManager:
@@ -53,7 +55,8 @@ class ProcessManager:
             if not screen_pid:
                 raise ProcessError("Firecracker is not running")
 
-            self._logger.info(f"Firecracker is running with PID: {screen_pid}")
+            if self._logger.verbose:
+                self._logger.debug(f"Firecracker is running with PID: {screen_pid}")
 
             screen_ps = psutil.Process(int(screen_pid))
             self.wait_process_running(screen_ps)
@@ -169,3 +172,20 @@ class ProcessManager:
 
         except Exception as e:
             raise ProcessError(f"Failed to get all PIDs: {str(e)}")
+
+    @retry(
+        stop=stop_after_delay(3),
+        wait=wait_fixed(0.5),
+        retry=retry_if_exception_type(ProcessError)
+    )
+    def _wait_for_process_start(self, screen_pid: str):
+        """Wait for the Firecracker process to start and become available.
+        
+        Args:
+            screen_pid (str): The screen process ID to check
+            
+        Raises:
+            ProcessError: If the process is not running after retry attempts
+        """
+        if not psutil.pid_exists(int(screen_pid)):
+            raise ProcessError("Firecracker process is not running")
