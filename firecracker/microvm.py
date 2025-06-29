@@ -9,9 +9,7 @@ import docker
 import tarfile
 import tempfile
 from http import HTTPStatus
-from paramiko import SSHClient, AutoAddPolicy, SSHException
 from typing import List, Dict
-from tenacity import retry, stop_after_attempt, stop_after_delay, wait_fixed, retry_if_exception_type
 from firecracker.config import MicroVMConfig
 from firecracker.api import Api
 from firecracker.logger import Logger
@@ -19,7 +17,9 @@ from firecracker.network import NetworkManager
 from firecracker.process import ProcessManager
 from firecracker.vmm import VMMManager
 from firecracker.utils import run, get_public_ip, validate_ip_address, generate_id, generate_name, generate_mac_address
-from firecracker.exceptions import APIError, VMMError, ConfigurationError
+from firecracker.exceptions import VMMError, ConfigurationError
+from paramiko import SSHClient, AutoAddPolicy, SSHException
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 
 class MicroVM:
@@ -27,14 +27,43 @@ class MicroVM:
 
     Args:
         id (str, optional): ID for the MicroVM
+        name (str, optional): Name for the MicroVM
+        kernel_file (str, optional): Path to the kernel file
+        kernel_url (str, optional): URL to the kernel file
+        initrd_file (str, optional): Path to the initrd file
+        init_file (str, optional): Path to the init file
+        image (str, optional): Docker image to use for the MicroVM
+        base_rootfs (str, optional): Path to the base rootfs file
+        rootfs_size (str, optional): Size of the rootfs file
+        overlayfs (bool, optional): Whether to use overlayfs
+        overlayfs_file (str, optional): Path to the overlayfs file
+        vcpu (int, optional): Number of vCPUs
+        memory (int, optional): Amount of memory
+        ip_addr (str, optional): IP address for the MicroVM
+        mmds_enabled (bool, optional): Whether to enable mmds
+        mmds_ip (str, optional): IP address for the mmds
+        user_data (str, optional): User data for the MicroVM
+        user_data_file (str, optional): Path to the user data file
+        labels (dict, optional): Labels for the MicroVM
+        expose_ports (bool, optional): Whether to expose ports
+        host_port (int, optional): Host port to expose
+        dest_port (int, optional): Destination port to expose
+        verbose (bool, optional): Whether to enable verbose logging
+        level (str, optional): Logging level
+
+    Raises:
+        ValueError: If the configuration is invalid
+        VMMError: If the VMM creation fails
+        SSHException: If the SSH connection fails
+        ConfigurationError: If the configuration is invalid
+        ProcessError: If the process fails
     """
-    def __init__(self, name: str = None, kernel_file: str = None, initrd_file: str = None, init_file: str = None,
+    def __init__(self, name: str = None, kernel_file: str = None, kernel_url: str = None, initrd_file: str = None, init_file: str = None,
                  image: str = None, base_rootfs: str = None, rootfs_size: str = None, overlayfs: bool = False, overlayfs_file: str = None,
-                 vcpu: int = None, memory: int = None, ip_addr: str = None, bridge: bool = None, bridge_name: str = None,
+                 vcpu: int = None, memory: int = None, ip_addr: str = None,
                  mmds_enabled: bool = None, mmds_ip: str = None, user_data: str = None, user_data_file: str = None,
                  labels: dict = None, expose_ports: bool = False, host_port: int = None, dest_port: int = None,
                  verbose: bool = False, level: str = "INFO") -> None:
-        """Initialize a new MicroVM instance with configuration."""
         self._microvm_id = generate_id()
         self._microvm_name = generate_name() if name is None else name
 
@@ -47,9 +76,10 @@ class MicroVM:
         self._process = ProcessManager(verbose=verbose, level=level)
         self._vmm = VMMManager(verbose=verbose, level=level)
 
-        self._vcpu = vcpu or self._config.vcpu
+        self._vcpu = int(vcpu) or self._config.vcpu
         if not isinstance(self._vcpu, int) or self._vcpu <= 0:
-            print("vcpu must be a positive integer")
+            raise ValueError("vcpu must be a positive integer (greater than zero)")
+        
         self._memory = int(self._convert_memory_size(memory or self._config.memory))
         self._mmds_enabled = mmds_enabled if mmds_enabled is not None else self._config.mmds_enabled
         self._mmds_ip = mmds_ip or self._config.mmds_ip
@@ -58,7 +88,7 @@ class MicroVM:
             raise ValueError("Cannot specify both user_data and user_data_file. Use only one of them.")
         if user_data_file:
             if not os.path.exists(user_data_file):
-                print(f"User data file not found: {user_data_file}")
+                raise ValueError(f"User data file not found: {user_data_file}")
             with open(user_data_file, 'r') as f:
                 self._user_data = f.read()
         else:
@@ -77,38 +107,52 @@ class MicroVM:
         else:
             self._ip_addr = self._config.ip_addr
         self._gateway_ip = self._network.get_gateway_ip(self._ip_addr)
-        self._bridge = bridge if bridge is not None else self._config.bridge
-        self._bridge_name = bridge_name or self._config.bridge_name
 
         self._socket_file = f"{self._config.data_path}/{self._microvm_id}/firecracker.socket"
         self._vmm_dir = f"{self._config.data_path}/{self._microvm_id}"
         self._log_dir = f"{self._vmm_dir}/logs"
         self._rootfs_dir = f"{self._vmm_dir}/rootfs"
 
-        self._kernel_file = kernel_file or self._config.kernel_file
-        if not os.path.exists(self._kernel_file):
-            print(f"Kernel file not found: {self._kernel_file}")
-        self._initrd_file = initrd_file or self._config.initrd_file
-        if self._initrd_file:
-            if not os.path.exists(self._initrd_file):
-                print(f"Initrd file not found: {self._initrd_file}")
-        self._init_file = init_file or self._config.init_file
-
         self._docker = docker.from_env()
         self._docker_image = image
 
         if image:
+            if not base_rootfs:
+                raise ValueError("base_rootfs is required when image is provided")
             if not self._is_valid_docker_image(image):
-                print(f"Invalid Docker image: {image}")
-            self._base_rootfs = base_rootfs
-        elif base_rootfs:
-            if not os.path.exists(base_rootfs):
-                print(f"Base rootfs file not found: {base_rootfs}")
-            self._base_rootfs = base_rootfs
+                raise ValueError(f"Invalid Docker image: {image}")
+            self._download_docker(image)
+
+        if kernel_url:
+            if not kernel_file:
+                raise ValueError("kernel_file is required when kernel_url is provided")
+            self._kernel_file = kernel_file
+            self._download_kernel(kernel_url, self._kernel_file)
         else:
-            self._base_rootfs = self._config.base_rootfs
-            if not os.path.exists(self._base_rootfs):
-                print(f"Default rootfs file not found: {self._base_rootfs}")
+            if kernel_file:
+                if not os.path.exists(kernel_file):
+                    raise FileNotFoundError(f"Kernel file not found: {kernel_file}")
+                self._kernel_file = kernel_file
+            elif image:
+                self._kernel_file = None
+            else:
+                raise ValueError("kernel_file is required when no kernel_url or image is provided")
+
+        if initrd_file:
+            if not os.path.exists(initrd_file):
+                raise FileNotFoundError(f"Initrd file not found: {initrd_file}")
+            self._initrd_file = initrd_file
+        else:
+            self._initrd_file = None
+
+        self._init_file = init_file or self._config.init_file
+
+        if base_rootfs:
+            if image:
+                self._base_rootfs = base_rootfs
+            elif not os.path.exists(base_rootfs):
+                raise FileNotFoundError(f"Base rootfs file not found: {base_rootfs}")
+            self._base_rootfs = base_rootfs
 
         if self._base_rootfs:
             base_rootfs_name = os.path.basename(self._base_rootfs.replace('./', ''))
@@ -126,7 +170,6 @@ class MicroVM:
         self._host_ip = get_public_ip()
         self._host_port = self._parse_ports(host_port)
         self._dest_port = self._parse_ports(dest_port)
-
         self._api = self._vmm.get_api(self._microvm_id)
 
     @staticmethod
@@ -255,8 +298,6 @@ class MicroVM:
                 tap_name=self._host_dev_name,
                 iface_name=self._iface_name,
                 gateway_ip=self._gateway_ip,
-                bridge=self._bridge,
-                bridge_name=self._bridge_name
             )
 
             self._run_firecracker()
@@ -272,32 +313,14 @@ class MicroVM:
             if self._expose_ports:
                 if not self._host_port or not self._dest_port:
                     raise ValueError("Port forwarding requested but no ports specified. Both host_port and dest_port must be set.")
-
-                host_ports = [self._host_port] if isinstance(self._host_port, int) else self._host_port
-                dest_ports = [self._dest_port] if isinstance(self._dest_port, int) else self._dest_port
-
-                if len(host_ports) != len(dest_ports):
-                    raise ValueError("Number of host ports must match number of destination ports")
-
-                for host_port, dest_port in zip(host_ports, dest_ports):
-                    self._network.add_port_forward(self._microvm_id, self._host_ip, host_port, self._ip_addr, dest_port)
-
-                ports = {}
-                for host_port, dest_port in zip(host_ports, dest_ports):
-                    port_key = f"{dest_port}/tcp"
-                    if port_key not in ports:
-                        ports[port_key] = []
-
-                    ports[port_key].append({
-                        "HostPort": host_port,
-                        "DestPort": dest_port
-                    })
+                
+                ports = self._setup_port_forwarding(self._host_port, self._dest_port, update_config=False)
             else:
                 ports = {}
 
-            pid, create_time = self._process.get_pids(self._microvm_id)
+            pid, create_time = self._process.get_pid(self._microvm_id)
 
-            if self._process.is_process_running(self._microvm_id):
+            if self._process.is_running(self._microvm_id):
                 self._vmm.create_vmm_json_file(
                     id=self._microvm_id,
                     Name=self._microvm_name,
@@ -445,11 +468,12 @@ class MicroVM:
             return f"SSH key file not found: {key_path}"
 
         try:
-            if not self._vmm.list_vmm():
+            vmm_list = self._vmm.list_vmm()
+            if not vmm_list:
                 return "No VMMs available to connect"
 
             id = id if id else self._microvm_id
-            available_vmm_ids = [vmm['id'] for vmm in self._vmm.list_vmm()]
+            available_vmm_ids = [vmm['id'] for vmm in vmm_list]
 
             if id not in available_vmm_ids:
                 return f"VMM with ID {id} does not exist"
@@ -517,22 +541,16 @@ class MicroVM:
             ValueError: If the provided ports are not valid port numbers
         """
         try:
-            if not self._vmm.list_vmm():
-                return "No VMMs available to forward ports"
+            vmm_list = self._vmm.list_vmm()
+            if not vmm_list:
+                return "No VMMs available"
 
-            id = id if id else self._microvm_id
-            available_vmm_ids = [vmm['id'] for vmm in self._vmm.list_vmm()]
+            id = id if id else self._microvm_id 
+            available_vmm_ids = [vmm['id'] for vmm in vmm_list]
             if id not in available_vmm_ids:
-                return f"VMM with ID {id} does not exist"
-
-            host_ip = get_public_ip()
-            if not host_ip:
-                raise VMMError("Could not determine host IP address")
+                return f"VMM with ID {id} does not exist" 
 
             config_path = f"{self._config.data_path}/{id}/config.json"
-            if not os.path.exists(config_path):
-                raise VMMError(f"Config file not found for VMM {id}")
-
             with open(config_path, "r") as f:
                 config = json.load(f)
                 if 'Network' not in config or f"tap_{id}" not in config['Network']:
@@ -548,19 +566,12 @@ class MicroVM:
             if not isinstance(host_port, (int, list)) or not isinstance(dest_port, (int, list)):
                 raise ValueError("Ports must be integers or lists of integers")
 
-            host_ports = [host_port] if isinstance(host_port, int) else host_port
-            dest_ports = [dest_port] if isinstance(dest_port, int) else dest_port
-
-            if len(host_ports) != len(dest_ports):
-                raise ValueError("Number of host ports must match number of destination ports")
-
-            for h_port, d_port in zip(host_ports, dest_ports):
-                if remove:
-                    self._network.delete_port_forward(id, h_port)
-                else:
-                    self._network.add_port_forward(id, host_ip, h_port, dest_ip, d_port)
-
-            return f"Port forwarding {'removed' if remove else 'added'} successfully"
+            if remove:
+                self._remove_port_forwarding(host_port, dest_port, id)
+                return f"Port forwarding removed successfully for VMM {id}"
+            else:
+                self._setup_port_forwarding(host_port, dest_port, id, dest_ip)
+                return f"Port forwarding added successfully for VMM {id}"
 
         except Exception as e:
             raise VMMError(f"Failed to configure port forwarding: {str(e)}")
@@ -603,7 +614,7 @@ class MicroVM:
     def _boot_args(self):
         """Generate boot arguments using current configuration."""
         common_args = (
-            "console=ttyS0 reboot=k panic=1 nomodules "
+            "console=ttyS0 reboot=k panic=1 "
             f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
             f"{self._microvm_name}:{self._iface_name}:on"
         )
@@ -618,9 +629,6 @@ class MicroVM:
     def _configure_vmm_boot_source(self):
         """Configure the boot source for the microVM."""
         try:
-            if not os.path.exists(self._kernel_file):
-                raise ConfigurationError(f"Kernel file not found: {self._kernel_file}")
-
             boot_params = {
                 'kernel_image_path': self._kernel_file,
                 'boot_args': self._boot_args
@@ -642,8 +650,6 @@ class MicroVM:
     def _configure_vmm_root_drive(self):
         """Configure the root drive for the microVM."""
         try:
-            # For overlayfs, use base_rootfs if available, otherwise use rootfs_file
-            # For Docker images, base_rootfs might be None, so use rootfs_file
             rootfs_path = self._rootfs_file
             if self._overlayfs and self._base_rootfs:
                 rootfs_path = self._base_rootfs
@@ -711,7 +717,7 @@ class MicroVM:
         """
         try:
             if self._config.verbose:
-                self._logger.info("MMDS is " + ("disabled" if not self._mmds_enabled else "enabled, configuring MMDS network..."))
+                self._logger.debug("MMDS is " + ("disabled" if not self._mmds_enabled else "enabled, configuring MMDS network..."))
 
             if not self._mmds_enabled:
                 return
@@ -755,54 +761,84 @@ class MicroVM:
                 self._vmm.create_vmm_dir(path)
 
             if not self._overlayfs and self._base_rootfs and os.path.exists(self._base_rootfs):
-                run(f"cp {self._base_rootfs} {self._rootfs_file}")
+                run(f"cp {self._base_rootfs} {self._rootfs_file}", capture_output=True)
                 if self._config.verbose:
                     self._logger.debug(f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}")
 
             for log_file in [f"{self._microvm_id}.log", f"{self._microvm_id}_screen.log"]:
                 self._vmm.create_log_file(self._microvm_id, log_file)
 
-            binary_params = [
-                f"--api-sock {self._socket_file}",
-                f"--id {self._microvm_id}",
-                f"--log-path {self._log_dir}/{self._microvm_id}.log"
+            args = [
+                "--api-sock", self._socket_file,
+                "--id", self._microvm_id,
+                "--log-path", f"{self._log_dir}/{self._microvm_id}.log"
             ]
 
-            session_name = f"fc_{self._microvm_id}"
-            screen_pid = self._process.start_screen_process(
-                screen_log=f"{self._log_dir}/{self._microvm_id}_screen.log",
-                session_name=session_name,
-                binary_path=self._config.binary_path,
-                binary_params=binary_params
-            )
+            self._process.start(self._microvm_id, args)
+            self._process.is_running(self._microvm_id)
 
-            self._process._wait_for_process_start(screen_pid)
-
-            return self._wait_for_api_connection()
+            for _ in range(3):
+                try:
+                    response = self._api.describe.get()
+                    if response.status_code == HTTPStatus.OK:
+                        return Api(self._socket_file)
+                except Exception:
+                    pass
+                time.sleep(0.5)
 
         except Exception as exc:
             self._vmm.cleanup(self._microvm_id)
             raise VMMError(str(exc))
 
-    @retry(
-        stop=stop_after_delay(3),
-        wait=wait_fixed(0.5),
-        retry=retry_if_exception_type(Exception)
-    )
-    def _wait_for_api_connection(self):
-        """Wait for the Firecracker API to become available.
+    def _download_kernel(self, url: str, path: str):
+        """Download the kernel file from the provided URL.
         
-        Returns:
-            Api: The API instance when connection is successful
+        Args:
+            url (str): URL to download the kernel from
+            path (str): Local path where to save the kernel file
             
         Raises:
-            APIError: If connection fails after all retry attempts
+            ValueError: If URL is invalid or doesn't contain http/https
+            VMMError: If download fails
         """
-        response = self._api.describe.get()
-        if response.status_code == HTTPStatus.OK:
-            return Api(self._socket_file)
-        else:
-            raise APIError(f"Error {response.status_code}: Failed to connect to the API socket")
+        import urllib.request
+        import urllib.parse
+        
+        if not url or not isinstance(url, str):
+            return "URL must be a non-empty string"
+  
+        if not (url.startswith('http://') or url.startswith('https://')):
+            return "URL must start with http:// or https://"
+
+        try:
+            parsed_url = urllib.parse.urlparse(url)
+            if not parsed_url.scheme or not parsed_url.netloc:
+                raise ValueError("Invalid URL format")
+
+        except Exception as e:
+            raise ValueError(f"Invalid URL format: {str(e)}")
+
+        if os.path.exists(path):
+            if self._config.verbose:
+                self._logger.info(f"Kernel file already exists: {path}")
+            return
+
+        try:
+            if self._config.verbose:
+                self._logger.info(f"Downloading kernel file from {url}...")
+
+            urllib.request.urlretrieve(url, path)
+
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                raise VMMError("Download failed: file is empty or was not created")
+                
+            if self._config.verbose:
+                self._logger.info(f"Kernel file downloaded successfully: {path}")
+                
+        except Exception as e:
+            if os.path.exists(path):
+                os.remove(path)
+            raise VMMError(f"Failed to download kernel from {url}: {str(e)}")
 
     def _convert_memory_size(self, size):
         """Convert memory size to MiB.
@@ -836,22 +872,25 @@ class MicroVM:
                 raise ValueError(f"Invalid memory size format: {size}")
         raise ValueError(f"Invalid memory size type: {type(size)}")
 
-    def _is_valid_docker_image(self, image_name):
+    def _is_valid_docker_image(self, name: str) -> bool:
         """
         Check if a Docker image is valid using Docker module only
         
         Args:
-            image_name (str): Docker image name (e.g., 'alpine', 'nginx:latest')
+            name (str): Docker image name (e.g., 'alpine', 'nginx:latest')
         
         Returns:
             bool: True if image exists in registry, False otherwise
         """
         try:
-            self._docker.api.inspect_distribution(image_name)
-            return True
-            
-        except Exception:
-            return False
+            inspect = self._docker.api.inspect_distribution(name)
+            if inspect:
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            raise VMMError(f"Failed to check if Docker image {name} is valid: {str(e)}")
 
     def _download_docker(self, image: str) -> str:
         """Download a Docker image and extract its root filesystem.
@@ -963,6 +1002,10 @@ class MicroVM:
             with tarfile.open(tar_file, 'r') as tar:
                 tar.extractall(path=tmp_dir)
 
+            os.remove(tar_file)
+            if self._config.verbose:
+                self._logger.debug(f"Removed tar file: {tar_file}")
+
             if self._config.verbose:
                 self._logger.info("Build rootfs completed")
 
@@ -995,3 +1038,101 @@ class MicroVM:
             username=username if username else self._config.ssh_user,
             key_filename=key_path
         )
+
+    def _setup_port_forwarding(self, host_ports, dest_ports, vmm_id=None, dest_ip=None, update_config=True):
+        """Helper method to set up port forwarding rules.
+        
+        Args:
+            host_ports: List of host ports or single port
+            dest_ports: List of destination ports or single port  
+            vmm_id: VMM ID (uses self._microvm_id if None)
+            dest_ip: Destination IP (uses self._ip_addr if None)
+            update_config: Whether to update the config file
+            
+        Returns:
+            dict: Port configuration dictionary
+            
+        Raises:
+            ValueError: If port validation fails
+            VMMError: If port forwarding setup fails
+        """
+        vmm_id = vmm_id or self._microvm_id
+        dest_ip = dest_ip or self._ip_addr
+        
+        # Parse and validate ports
+        host_ports_list = [host_ports] if isinstance(host_ports, int) else host_ports
+        dest_ports_list = [dest_ports] if isinstance(dest_ports, int) else dest_ports
+        
+        if len(host_ports_list) != len(dest_ports_list):
+            raise ValueError("Number of host ports must match number of destination ports")
+        
+        # Set up port forwarding rules and create configuration
+        ports_config = {}
+        for host_port, dest_port in zip(host_ports_list, dest_ports_list):
+            self._network.add_port_forward(vmm_id, self._host_ip, host_port, dest_ip, dest_port)
+            
+            port_key = f"{dest_port}/tcp"
+            if port_key not in ports_config:
+                ports_config[port_key] = []
+            
+            ports_config[port_key].append({
+                "HostPort": host_port,
+                "DestPort": dest_port
+            })
+
+        if update_config:
+            config_path = f"{self._config.data_path}/{vmm_id}/config.json"
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                
+                if 'Ports' not in config:
+                    config['Ports'] = {}
+                
+                config['Ports'].update(ports_config)
+                
+                with open(config_path, "w") as f:
+                    json.dump(config, f)
+                
+                if self._config.verbose:
+                    self._logger.debug(f"Added {host_port} -> {dest_port} to VMM {vmm_id}")
+                    self._logger.info(f"Port forwarding added successfully for VMM {vmm_id}")
+        
+        return ports_config
+
+    def _remove_port_forwarding(self, host_ports, dest_ports, vmm_id=None, update_config=True):
+        """Helper method to remove port forwarding rules.
+        
+        Args:
+            host_ports: List of host ports or single port
+            dest_ports: List of destination ports or single port
+            vmm_id: VMM ID (uses self._microvm_id if None)
+            update_config: Whether to update the config file
+            
+        Returns:
+            str: Status message
+        """
+        vmm_id = vmm_id or self._microvm_id
+        
+        host_ports_list = [host_ports] if isinstance(host_ports, int) else host_ports
+        dest_ports_list = [dest_ports] if isinstance(dest_ports, int) else dest_ports
+
+        for host_port, dest_port in zip(host_ports_list, dest_ports_list):
+            self._network.delete_port_forward(vmm_id, host_port)
+            if self._config.verbose:
+                self._logger.debug(f"Removed {host_port} -> {dest_port} from VMM {vmm_id}")
+        
+        if update_config:
+            config_path = f"{self._config.data_path}/{vmm_id}/config.json"
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                
+                for dest_port in dest_ports_list:
+                    config['Ports'].pop(f"{dest_port}/tcp", None)
+                
+                with open(config_path, "w") as f:
+                    json.dump(config, f)
+
+        if self._config.verbose:
+            self._logger.info(f"Port forwarding removed successfully for VMM {vmm_id}")
