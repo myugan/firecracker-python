@@ -1,3 +1,4 @@
+import os
 import sys
 import ipaddress
 from pyroute2 import IPRoute
@@ -6,11 +7,17 @@ from firecracker.utils import run
 from firecracker.config import MicroVMConfig
 from firecracker.exceptions import NetworkError, ConfigurationError
 from ipaddress import IPv4Address, IPv4Network, AddressValueError
-sys.path.append('/usr/lib/python3/dist-packages')
+
+if os.path.exists('/usr/lib/python3.12/site-packages'):
+    sys.path.append('/usr/lib/python3.12/site-packages')
+elif os.path.exists('/usr/lib/python3/dist-packages'):
+    sys.path.append('/usr/lib/python3/dist-packages')
+
 try:
     from nftables import Nftables
+    NFTABLES_AVAILABLE = True
 except ImportError:
-    print("Nftables module is not available. Please install it.")
+    NFTABLES_AVAILABLE = False
 
 
 class NetworkManager:
@@ -18,8 +25,13 @@ class NetworkManager:
     def __init__(self, verbose: bool = False, level: str = "INFO"):
         self._config = MicroVMConfig()
         self._config.verbose = verbose
-        self._nft = Nftables()
-        self._nft.set_json_output(True)
+        
+        if NFTABLES_AVAILABLE:
+            self._nft = Nftables()
+            self._nft.set_json_output(True)
+        else:
+            self._nft = None
+            
         self._ipr = IPRoute()
         self._logger = Logger(level=level, verbose=verbose)
 
@@ -75,14 +87,10 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to derive gateway IP: {str(e)}")
 
-    def setup(self, tap_name: str, iface_name: str, bridge: bool, bridge_name: str, gateway_ip: str):
+    def setup(self, tap_name: str, iface_name: str, gateway_ip: str):
         """Setup the network for the Firecracker VM."""
         if not self.check_tap_device(tap_name):
             self.create_tap(tap_name, iface_name, gateway_ip)
-
-        if bridge:
-            self.check_bridge_device(bridge_name)
-            self.attach_tap_to_bridge(iface_name, bridge_name)
 
         self.add_nat_rules(tap_name, iface_name)
         self.create_masquerade(iface_name)
@@ -118,39 +126,6 @@ class NetworkManager:
 
         return tap_rules
 
-    def check_bridge_device(self, bridge_name: str) -> bool:
-        """Check if the bridge device exists in the system.
-
-        Args:
-            bridge_name (str): Name of the bridge device to check.
-
-        Returns:
-            bool: True if the device exists, False otherwise.
-
-        Raises:
-            NetworkError: If checking the bridge device fails.
-        """
-        try:
-            links = self._ipr.link_lookup(ifname=bridge_name)
-            if not links:
-                if self._config.verbose:
-                    self._logger.info(f"Bridge device {bridge_name} not found")
-                return False
-
-            link_info = self._ipr.get_links(links[0])[0]
-            for attr_name, attr_value in link_info.get('attrs', []):
-                if attr_name == 'IFLA_LINKINFO':
-                    for info_attr_name, info_attr_value in attr_value.get('attrs', []):
-                        if info_attr_name == 'IFLA_INFO_KIND' and info_attr_value == 'bridge':
-                            if self._config.verbose:
-                                self._logger.info(f"Bridge device {bridge_name} exists")
-                            return True
-
-            return False
-
-        except Exception as e:
-            raise NetworkError(f"Failed to check bridge device {bridge_name}: {str(e)}")
-
     def check_tap_device(self, tap_device_name: str) -> bool:
         """Check if the tap device exists in the system using pyroute2.
 
@@ -173,6 +148,39 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to check tap device {tap_device_name}: {str(e)}")
 
+    def is_nftables_available(self) -> bool:
+        """Check if nftables functionality is available.
+        
+        Returns:
+            bool: True if nftables is available, False otherwise
+        """
+        return NFTABLES_AVAILABLE and self._nft is not None
+
+    def _safe_nft_cmd(self, cmd, json_cmd=True):
+        """Safely execute nftables command.
+        
+        Args:
+            cmd: Command to execute
+            json_cmd (bool): Whether to use json_cmd or cmd
+            
+        Returns:
+            tuple: (return_code, output, error) or (None, None, None) if nftables not available
+        """
+        if not self.is_nftables_available():
+            if self._config.verbose:
+                self._logger.warning("Nftables not available, skipping command")
+            return None, None, None
+            
+        try:
+            if json_cmd:
+                return self._nft.json_cmd(cmd)
+            else:
+                return self._nft.cmd(cmd)
+        except Exception as e:
+            if self._config.verbose:
+                self._logger.error(f"Nftables command failed: {str(e)}")
+            return 1, None, str(e)
+
     def add_nat_rules(self, tap_name: str, iface_name: str):
         """Create network rules using nftables Python module.
 
@@ -183,6 +191,11 @@ class NetworkManager:
         Raises:
             NetworkError: If adding NAT forwarding rule fails.
         """
+        if not self.is_nftables_available():
+            if self._config.verbose:
+                self._logger.warning("Nftables not available, skipping NAT rules")
+            return
+            
         try:
             rules = [
                 {
@@ -261,25 +274,31 @@ class NetworkManager:
             raise NetworkError(f"Failed to add NAT forwarding rule: {str(e)}")
 
     def get_nat_rules(self):
-        """Get all rules from the filter table.
+        """Get all NAT rules from nftables.
 
         Returns:
-            list: List of rules.
+            list: List of NAT rules.
 
         Raises:
-            NetworkError: If retrieving NAT forwarding rules fails.
+            NetworkError: If getting NAT rules fails.
         """
-        list_cmd = {"nftables": [{"list": {"table": {"family": "ip", "name": "filter"}}}]}
-        output = self._nft.json_cmd(list_cmd)
-
         try:
-            result = output[1]['nftables']
-            if self._config.verbose:
-                self._logger.debug(f"Found {len(result)} rules in the filter table")
-            return result
+            rule = {"nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]}
+            rc, output, error = self._safe_nft_cmd(rule)
+            
+            if rc is None:  # Nftables not available
+                return []
+                
+            if rc != 0:
+                raise NetworkError(f"Failed to get NAT rules: {error}")
+
+            if output and 'nftables' in output:
+                return output['nftables']
+            else:
+                return []
 
         except Exception as e:
-            raise NetworkError(f"Failed to get NAT forwarding rules: {str(e)}")
+            raise NetworkError(f"Failed to get NAT rules: {str(e)}")
 
     def get_masquerade_handle(self):
         """
@@ -338,7 +357,7 @@ class NetworkManager:
             handle = self.get_masquerade_handle()
             if handle is not None:
                 if self._config.verbose:
-                    self._logger.info("Masquerade rule already exists")
+                    self._logger.debug("Masquerade rule already exists")
                 return True
 
             add_cmd = {
@@ -781,7 +800,7 @@ class NetworkManager:
 
                     if self._config.verbose:
                         if rc == 0:
-                            self._logger.info(f"{chain} rule with handle {handle} deleted")
+                            self._logger.debug(f"{chain} rule with handle {handle} deleted")
                         else:
                             self._logger.warn(f"Error deleting {chain} rule with handle {handle}: {error}")
 
@@ -937,7 +956,6 @@ class NetworkManager:
             iface_name (str, optional): Name of the interface for firewall rules.
             name (str, optional): Name for the new tap device.
             gateway_ip (str, optional): IP address to be assigned to the tap device.
-            bridge (bool): Whether to use bridge mode.
 
         Raises:
             NetworkError: If tap device creation or configuration fails.
@@ -964,27 +982,6 @@ class NetworkManager:
         except Exception as e:
             self.cleanup(tap_name)
             raise NetworkError(f"Failed to create TAP device {tap_name}: {str(e)}")
-
-    def attach_tap_to_bridge(self, iface_name: str, bridge_name: str):
-        """Attach a tap device to a bridge.
-
-        Args:
-            iface_name (str): Name of the tap device to attach.
-            bridge_name (str): Name of the bridge to attach the tap device to.
-        """
-        try:
-            bridge_idx = self._ipr.link_lookup(ifname=bridge_name)[0]
-            idx = self._ipr.link_lookup(ifname=iface_name)[0]
-            self._ipr.link('set', index=idx, master=bridge_idx)
-            if self._config.verbose:
-                self._logger.info(f"Attached tap device {iface_name} to bridge {bridge_name}")
-
-            return True
-
-        except Exception as e:
-            raise NetworkError(
-                f"Failed to attach tap device {iface_name} to bridge {bridge_name}: {str(e)}"
-            )
 
     def delete_tap(self, name: str) -> None:
         """Delete a tap device using pyroute2.
