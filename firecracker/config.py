@@ -7,7 +7,7 @@ class MicroVMConfig:
     """Configuration defaults for Firecracker microVMs."""
     data_path: str = "/var/lib/firecracker"
     binary_path: str = "/usr/local/bin/firecracker"
-    kernel_file: str = os.path.join(data_path, "vmlinux")
+    kernel_file: str = None
     rootfs_size: str = "5G"
     initrd_file: str = None
     init_file: str = "/sbin/init"
@@ -15,8 +15,6 @@ class MicroVMConfig:
     overlayfs: bool = False
     overlayfs_file: str = None
     ip_addr: str = "172.16.0.2"
-    bridge: bool = True
-    bridge_name: str = "docker0"
     mmds_enabled: bool = False
     mmds_ip: str = "169.254.169.254"
     user_data: str = None
@@ -24,7 +22,6 @@ class MicroVMConfig:
     memory: int = 512
     hostname: str = "fc-vm"
     verbose: bool = False
-    level: str = "INFO"
     ssh_user: str = "root"
     expose_ports: bool = False
     host_port: int = None

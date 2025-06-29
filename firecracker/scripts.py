@@ -1,5 +1,5 @@
 import os
-from firecracker.config import MicroVMConfig
+from .config import MicroVMConfig
 from .exceptions import ConfigurationError
 
 
@@ -22,7 +22,6 @@ def check_firecracker_binary():
     except Exception as e:
         raise ConfigurationError(f"Failed to check Firecracker binary: {str(e)}") from e
 
-
 def create_firecracker_directory():
     """Create the Firecracker data directory if it doesn't exist.
 
@@ -36,8 +35,6 @@ def create_firecracker_directory():
         if not os.path.exists(data_path):
             os.makedirs(data_path, mode=0o755)
             print(f"Created Firecracker data directory at: {data_path}")
-        else:
-            print(f"Firecracker data directory already exists at: {data_path}")
 
     except Exception as e:
         raise ConfigurationError(f"Failed to create Firecracker data directory: {str(e)}") from e
