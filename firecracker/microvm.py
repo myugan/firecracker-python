@@ -76,7 +76,7 @@ class MicroVM:
         self._process = ProcessManager(verbose=verbose, level=level)
         self._vmm = VMMManager(verbose=verbose, level=level)
 
-        self._vcpu = int(vcpu) or self._config.vcpu
+        self._vcpu = vcpu or self._config.vcpu
         if not isinstance(self._vcpu, int) or self._vcpu <= 0:
             raise ValueError("vcpu must be a positive integer (greater than zero)")
         
