@@ -1,11 +1,8 @@
 import os
-import re
 import time
 import psutil
-import signal
 import subprocess
 from datetime import datetime
-from firecracker.utils import run, safe_kill
 from firecracker.logger import Logger
 from firecracker.config import MicroVMConfig
 from firecracker.exceptions import ProcessError
@@ -15,177 +12,197 @@ from tenacity import retry, stop_after_delay, wait_fixed, retry_if_exception_typ
 class ProcessManager:
     """Manages process-related operations for Firecracker microVMs."""
 
-    FLUSH_CMD = "screen -S {session} -X colon 'logfile flush 0^M'"
-
     def __init__(self, verbose: bool = False, level: str = "INFO"):
         self._logger = Logger(level=level, verbose=verbose)
         self._config = MicroVMConfig()
         self._config.verbose = verbose
 
-    def start_screen_process(self, screen_log: str, session_name: str,
-                           binary_path: str, binary_params: list) -> str:
-        """Start a binary process within a screen session.
-
+    def start(self, id: str, args: list) -> str:
+        """Start a Firecracker process.
+        
         Args:
-            screen_log (str): Path to screen log file
-            session_name (str): Name for the screen session
-            binary_path (str): Path to the binary to execute
-            binary_params (list): Parameters for the binary
-
+            id (str): The ID of the Firecracker VM
+            args (list): List of command arguments
+            
         Returns:
-            str: Process ID of the screen session
-
+            str: Process ID if successful
+            
         Raises:
-            ProcessError: If the process fails to start or verify
+            ProcessError: If process fails to start or becomes defunct
         """
         try:
-            start_cmd = "screen -L -Logfile {logfile} -dmS {session} {binary} {params}".format(
-                logfile=screen_log,
-                session=session_name,
-                binary=binary_path,
-                params=" ".join(binary_params)
+            cmd = [self._config.binary_path] + args
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=open(f"{self._config.data_path}/{id}/firecracker.log", "w"),
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True
             )
+            
+            if process.poll() is None:
+                proc = psutil.Process(process.pid)
+                if proc.status() == psutil.STATUS_ZOMBIE:
+                    raise ProcessError("Firecracker process became defunct")
 
-            run(start_cmd)
+                with open(f"{self._config.data_path}/{id}/firecracker.pid", "w") as f:
+                    f.write(str(process.pid))
+                    
+                if self._logger.verbose:
+                    self._logger.debug(f"Firecracker process started with PID: {process.pid}")
 
-            get_screen_pid = run(
-                f"screen -ls | grep {session_name} | head -1 | awk '{{print $1}}' | cut -d. -f1"
-            )
-            screen_pid = get_screen_pid.stdout.strip()
-            if not screen_pid:
-                raise ProcessError("Firecracker is not running")
-
-            if self._logger.verbose:
-                self._logger.debug(f"Firecracker is running with PID: {screen_pid}")
-
-            screen_ps = psutil.Process(int(screen_pid))
-            self.wait_process_running(screen_ps)
-
-            try:
-                run(self.FLUSH_CMD.format(session=session_name))
-            except subprocess.SubprocessError as e:
-                raise ProcessError(f"Failed to configure screen flush: {str(e)}")
-
-            return screen_pid
-
-        except Exception:
-            try:
-                if screen_pid:
-                    if self._logger.verbose:
-                        self._logger.info(f"Killing screen session {screen_pid}")
-                    safe_kill(int(screen_pid))
-            except Exception as cleanup_error:
-                raise ProcessError(f"Cleanup after failure error: {str(cleanup_error)}") from cleanup_error
-
-    def cleanup_screen_session(self, session_name: str):
-        """Clean up a screen session.
-
-        Args:
-            session_name (str): Name of the screen session to cleanup
-        """
-        try:
-            run(f"screen -S {session_name} -X quit")
-            time.sleep(0.5)
-
-            screen_check = run(f"screen -ls | grep {session_name}")
-            if screen_check.returncode == 0:
-                # Get a list of PIDs - using more specific pattern matching
-                cmd = f"screen -ls | grep '[0-9]\\.{session_name}' | awk '{{print $1}}' | cut -d. -f1"
-                screen_pid_output = run(cmd).stdout.strip()
-
-                if screen_pid_output:
-                    for pid in screen_pid_output.splitlines():
-                        try:
-                            pid_int = int(pid.strip())
-                            if self._logger.verbose:
-                                self._logger.info(f"Killing screen session {pid_int}")
-                            safe_kill(pid_int, signal.SIGKILL)
-                            time.sleep(0.5)  # Ensure the process is terminated
-                        except (ProcessLookupError, ValueError) as e:
-                            self._logger.warn(f"Failed to kill process {pid}: {str(e)}")
-
-                    return screen_pid_output.splitlines()[0] if screen_pid_output.splitlines() else None
-
-            return None
+                return process.pid
 
         except Exception as e:
-            self._logger.error(f"Failed to cleanup screen session: {str(e)}")
-            raise ProcessError(f"Failed to cleanup screen session: {str(e)}")
-
-    @staticmethod
-    def wait_process_running(process: psutil.Process):
-        """Wait for a process to run."""
-        assert process.is_running()
-
-    def is_process_running(self, id: str) -> bool:
-        """Check if a process is running.
-
-        Args:
-            id (str): ID of the process to check
-
-        Returns:
-            bool: True if the process is running, False otherwise
-        """
-        try:
-            screen_process = run(f"screen -ls | grep {id} | head -1")
-            if screen_process.returncode == 0:
-                screen_output = screen_process.stdout.strip()
-                if "Dead" in screen_output:
-                    return False
-
-                match = re.search(r'\d+', screen_output)
-                if match:
-                    screen_pid = match.group(0)
-                    if screen_pid:
-                        process = psutil.Process(int(screen_pid))
-                        return process.is_running()
-            return False
-
-        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-            return False
-
-    def get_pids(self, id: str):
-        """Get the PIDs of all running Firecracker processes."""
-        try:
-            screen_process = run(f"screen -ls | grep {id} | head -1 | awk '{{print $1}}' | cut -d. -f1")
-            if screen_process.returncode == 0:
-                screen_pid = screen_process.stdout.strip()
-                if screen_pid:
-                    process = psutil.Process(int(screen_pid))
-                    pid = process.pid
-                    create_time = datetime.fromtimestamp(
-                        process.create_time()
-                    ).strftime('%Y-%m-%d %H:%M:%S')
-                    return pid, create_time
-
-        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-            return False
-
-    def get_all_pids(self):
-        """Get the PIDs of all running processes."""
-        try:
-            pids = run("screen -ls | grep 'fc_' | awk '{print $1}' | cut -d. -f1")
-            pid_list = []
-            for pid in pids.stdout.strip().splitlines():
-                pid_list.append(int(pid))
-            return pid_list
-
-        except Exception as e:
-            raise ProcessError(f"Failed to get all PIDs: {str(e)}")
+            raise ProcessError(f"Failed to start Firecracker: {str(e)}")
 
     @retry(
         stop=stop_after_delay(3),
         wait=wait_fixed(0.5),
         retry=retry_if_exception_type(ProcessError)
     )
-    def _wait_for_process_start(self, screen_pid: str):
-        """Wait for the Firecracker process to start and become available.
+    def is_running(self, id: str) -> bool:
+        """Check if Firecracker is running."""
+        try:
+            if os.path.exists(f"{self._config.data_path}/{id}/firecracker.pid"):
+                with open(f"{self._config.data_path}/{id}/firecracker.pid", "r") as f:
+                    pid = int(f.read().strip())
+
+                try:
+                    os.kill(pid, 0)
+                    if self._logger.verbose:
+                        self._logger.debug(f"Firecracker is running with PID: {pid}")
+                    return True
+                except OSError:
+                    if self._logger.verbose:
+                        self._logger.info("Firecracker is not running (stale PID file)")
+                    os.remove(f"{self._config.data_path}/{id}/firecracker.pid")
+                    return False
+            else:
+                if self._logger.verbose:
+                    self._logger.info("Firecracker is not running")
+                return False
+
+        except Exception as e:
+            if self._logger.verbose:
+                self._logger.error(f"Error checking status: {e}")
+            return False
+
+    def stop(self, id: str) -> bool:
+        """Stop Firecracker."""
+        try:
+            if os.path.exists(f"{self._config.data_path}/{id}/firecracker.pid"):
+                with open(f"{self._config.data_path}/{id}/firecracker.pid", "r") as f:
+                    pid = int(f.read().strip())
+
+                os.kill(pid, 15)
+                time.sleep(0.5)
+
+                try:
+                    os.kill(pid, 0)
+                    os.kill(pid, 9)
+                    if self._logger.verbose:
+                        self._logger.info(f"Firecracker process {pid} force killed")
+                except OSError:
+                    if self._logger.verbose:
+                        self._logger.info(f"Firecracker process {pid} terminated")
+                
+                os.remove(f"{self._config.data_path}/{id}/firecracker.pid")
+                if self._logger.verbose:
+                    self._logger.debug(f"Removed PID file: {pid}")
+
+                if os.path.exists(f"{self._config.data_path}/{id}/firecracker.socket"):
+                    os.remove(f"{self._config.data_path}/{id}/firecracker.socket")
+
+                return True
+            else:
+                if self._logger.verbose:
+                    self._logger.info("Firecracker is not running")
+                return False
+
+        except Exception as e:
+            if self._logger.verbose:
+                self._logger.error(f"Error stopping Firecracker: {e}")
+            return False
+
+    def get_pid(self, id: str) -> tuple:
+        """Get the PID of the Firecracker process.
         
         Args:
-            screen_pid (str): The screen process ID to check
+            id (str): The ID of the Firecracker VM
+            
+        Returns:
+            tuple: (pid, create_time) if process is found and running
             
         Raises:
-            ProcessError: If the process is not running after retry attempts
+            ProcessError: If the process is not found or not running
         """
-        if not psutil.pid_exists(int(screen_pid)):
-            raise ProcessError("Firecracker process is not running")
+        try:
+            pid_file = f"{self._config.data_path}/{id}/firecracker.pid"
+            if not os.path.exists(pid_file):
+                raise ProcessError(f"No PID file found for VM {id}")
+                
+            with open(pid_file, "r") as f:
+                pid = int(f.read().strip())
+
+            try:
+                process = psutil.Process(pid)
+                if not process.is_running():
+                    os.remove(pid_file)
+                    raise ProcessError(f"Firecracker process {pid} is not running")
+
+                if process.name() != 'firecracker':
+                    os.remove(pid_file)
+                    raise ProcessError(f"Process {pid} is not a Firecracker process")
+
+                create_time = datetime.fromtimestamp(
+                    process.create_time()
+                ).strftime('%Y-%m-%d %H:%M:%S')
+                
+                if self._logger.verbose:
+                    self._logger.debug(f"Found Firecracker process {pid} created at {create_time}")
+
+                return pid, create_time
+
+            except psutil.NoSuchProcess:
+                os.remove(pid_file)
+                raise ProcessError(f"Firecracker process {pid} is not running")
+
+            except psutil.AccessDenied:
+                raise ProcessError(f"Access denied to process {pid}")
+
+            except psutil.TimeoutExpired:
+                raise ProcessError(f"Timeout while checking process {pid}")
+                
+        except Exception as e:
+            raise ProcessError(f"Failed to get Firecracker PID: {str(e)}")
+
+    def get_pids(self) -> list:
+        """
+        Get all PIDs of the Firecracker processes that have --api-sock parameter.
+        
+        Returns:
+            list: List of process IDs (integers)
+        """
+        pid_list = []
+        
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if proc.info['name'] == 'firecracker':
+                        cmdline = proc.info['cmdline']
+                        if cmdline and len(cmdline) > 1 and '--api-sock' in cmdline:
+                            pid_list.append(proc.info['pid'])
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+
+        except Exception as e:
+            raise ProcessError(f"Failed to get Firecracker processes: {str(e)}")
+            
+        return pid_list
+
+    @staticmethod
+    def wait_process_running(process: psutil.Process):
+        """Wait for a process to run."""
+        assert process.is_running()
