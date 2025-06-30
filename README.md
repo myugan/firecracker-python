@@ -13,7 +13,7 @@
 
 Some features are still being developed and will be added in the future. You can track these in the [TODO.md](TODO.md) file.
 
-[![asciicast](https://asciinema.org/a/nCD68S0KICqXt5206Eb3TA8FJ.svg)](https://asciinema.org/a/nCD68S0KICqXt5206Eb3TA8FJ)
+[![asciicast](https://asciinema.org/a/725316.svg)](https://asciinema.org/a/725316)
 
 ## Table of Contents
 
