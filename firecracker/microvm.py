@@ -612,7 +612,11 @@ class MicroVM:
 
     @property
     def _boot_args(self):
-        """Generate boot arguments using current configuration."""
+        """Generate boot arguments using current configuration.
+        
+        Returns:
+            str: Boot arguments
+        """
         common_args = (
             "console=ttyS0 reboot=k panic=1 "
             f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
@@ -627,7 +631,11 @@ class MicroVM:
             return f"{common_args}"
 
     def _configure_vmm_boot_source(self):
-        """Configure the boot source for the microVM."""
+        """Configure the boot source for the microVM.
+        
+        Raises:
+            ConfigurationError: If boot source configuration fails
+        """
         try:
             boot_params = {
                 'kernel_image_path': self._kernel_file,
@@ -648,7 +656,11 @@ class MicroVM:
             raise ConfigurationError(f"Failed to configure boot source: {str(e)}")
 
     def _configure_vmm_root_drive(self):
-        """Configure the root drive for the microVM."""
+        """Configure the root drive for the microVM.
+        
+        Raises:
+            ConfigurationError: If root drive configuration fails
+        """
         try:
             rootfs_path = self._rootfs_file
             if self._overlayfs and self._base_rootfs:
@@ -678,7 +690,11 @@ class MicroVM:
             raise ConfigurationError("Failed to configure root drive")
 
     def _configure_vmm_resources(self):
-        """Configure machine resources (vCPUs and memory)."""
+        """Configure machine resources (vCPUs and memory).
+        
+        Raises:
+            ConfigurationError: If machine configuration fails
+        """
         try:
             self._api.machine_config.put(
                 vcpu_count=self._vcpu,
@@ -752,7 +768,14 @@ class MicroVM:
             raise ConfigurationError(f"Failed to configure MMDS: {str(e)}")
 
     def _run_firecracker(self):
-        """Start a new Firecracker process using screen."""
+        """Run the Firecracker process.
+
+        Raises:
+            VMMError: If Firecracker process fails to start
+            ConfigurationError: If Firecracker configuration fails
+            NetworkError: If network configuration fails
+            SSHException: If SSH connection fails
+        """
         try:
             self._vmm.socket_file(self._microvm_id)
 
@@ -765,8 +788,7 @@ class MicroVM:
                 if self._config.verbose:
                     self._logger.debug(f"Copied base rootfs from {self._base_rootfs} to {self._rootfs_file}")
 
-            for log_file in [f"{self._microvm_id}.log", f"{self._microvm_id}_screen.log"]:
-                self._vmm.create_log_file(self._microvm_id, log_file)
+            self._vmm.create_log_file(self._microvm_id, f"{self._microvm_id}.log")
 
             args = [
                 "--api-sock", self._socket_file,
@@ -937,7 +959,7 @@ class MicroVM:
         Returns:
             str: Path to the exported tar file
         """
-        container_name = image.split('/')[-1]
+        container_name = image.split('/')[-1].replace(':', '-')
         tar_file = f"{self._config.data_path}/rootfs_{container_name}.tar"
 
         try:
@@ -1058,15 +1080,13 @@ class MicroVM:
         """
         vmm_id = vmm_id or self._microvm_id
         dest_ip = dest_ip or self._ip_addr
-        
-        # Parse and validate ports
+
         host_ports_list = [host_ports] if isinstance(host_ports, int) else host_ports
         dest_ports_list = [dest_ports] if isinstance(dest_ports, int) else dest_ports
         
         if len(host_ports_list) != len(dest_ports_list):
             raise ValueError("Number of host ports must match number of destination ports")
-        
-        # Set up port forwarding rules and create configuration
+
         ports_config = {}
         for host_port, dest_port in zip(host_ports_list, dest_ports_list):
             self._network.add_port_forward(vmm_id, self._host_ip, host_port, dest_ip, dest_port)
