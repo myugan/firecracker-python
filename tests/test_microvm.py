@@ -28,14 +28,16 @@ def generate_random_id(length=8):
 
 def test_create_with_invalid_rootfs_path():
     """Test VM creation with invalid rootfs path"""
-    with pytest.raises(FileNotFoundError, match=r"Base rootfs file not found:"):
-        MicroVM(kernel_file=KERNEL_FILE, base_rootfs="/invalid/path/to/rootfs")
+    vm = MicroVM(kernel_file=KERNEL_FILE, base_rootfs="/invalid/path/to/rootfs")
+    with pytest.raises(VMMError, match=r"Failed to create VMM .*: Base rootfs not found:"):
+        vm.create()
 
 
 def test_create_with_invalid_kernel_file():
     """Test VM creation with missing kernel file"""
-    with pytest.raises(FileNotFoundError, match=r"Kernel file not found:"):
-        MicroVM(kernel_file="/nonexistent/kernel", base_rootfs=BASE_ROOTFS)
+    vm = MicroVM(kernel_file="/nonexistent/kernel", base_rootfs=BASE_ROOTFS)
+    with pytest.raises(VMMError, match=r"Failed to create VMM .*: Kernel file not found:"):
+        vm.create()
 
 
 def test_create_with_invalid_docker_image():
@@ -52,8 +54,9 @@ def test_create_with_missing_base_rootfs_for_docker():
 
 def test_create_with_kernel_url_missing_kernel_file():
     """Test VM creation with kernel URL but missing kernel file"""
-    with pytest.raises(ValueError, match=r"kernel_file is required when kernel_url is provided"):
-        MicroVM(kernel_url="https://example.com/kernel")
+    vm = MicroVM(kernel_url="https://example.com/kernel")
+    with pytest.raises(VMMError, match=r"Failed to create VMM .*: kernel_file is required when no kernel_url or image is provided"):
+        vm.create()
 
 
 def test_create_with_both_user_data_and_user_data_file():
@@ -317,7 +320,7 @@ def test_ip_address_overlap():
     vm = MicroVM(kernel_file=KERNEL_FILE, base_rootfs=BASE_ROOTFS)
     result = vm.create()
 
-    assert f"IP address 172.16.0.2 is already in use" in result
+    assert "IP address 172.16.0.2 is already in use" in result
 
 
 def test_network_conflict_detection():

@@ -123,20 +123,17 @@ class MicroVM:
                 raise ValueError(f"Invalid Docker image: {image}")
             self._download_docker(image)
 
-        if kernel_url:
-            if not kernel_file:
-                raise ValueError("kernel_file is required when kernel_url is provided")
+        if kernel_url and kernel_file:
             self._kernel_file = kernel_file
             self._download_kernel(kernel_url, self._kernel_file)
+        elif kernel_file:
+            self._kernel_file = kernel_file
+        elif kernel_url:
+            self._kernel_file = None
+        elif image:
+            self._kernel_file = None
         else:
-            if kernel_file:
-                if not os.path.exists(kernel_file):
-                    raise FileNotFoundError(f"Kernel file not found: {kernel_file}")
-                self._kernel_file = kernel_file
-            elif image:
-                self._kernel_file = None
-            else:
-                raise ValueError("kernel_file is required when no kernel_url or image is provided")
+            self._kernel_file = None
 
         if initrd_file:
             if not os.path.exists(initrd_file):
@@ -148,13 +145,7 @@ class MicroVM:
         self._init_file = init_file or self._config.init_file
 
         if base_rootfs:
-            if image:
-                self._base_rootfs = base_rootfs
-            elif not os.path.exists(base_rootfs):
-                raise FileNotFoundError(f"Base rootfs file not found: {base_rootfs}")
             self._base_rootfs = base_rootfs
-
-        if self._base_rootfs:
             base_rootfs_name = os.path.basename(self._base_rootfs.replace('./', ''))
             self._rootfs_file = os.path.join(self._rootfs_dir, base_rootfs_name)
 
@@ -285,6 +276,15 @@ class MicroVM:
             return f"VMM with ID {self._microvm_id} already exists"
 
         try:
+            if self._kernel_file is None:
+                raise ValueError("kernel_file is required when no kernel_url or image is provided")
+            if self._base_rootfs is None:
+                raise ValueError("base_rootfs is required when no kernel_url or image is provided")
+
+            for file_path, name in [(self._kernel_file, "kernel file"), (self._base_rootfs, "base rootfs")]:
+                if not os.path.exists(file_path):
+                    raise FileNotFoundError(f"{name.capitalize()} not found: {file_path}")
+
             if self._vmm.check_network_overlap(self._ip_addr):
                 return f"IP address {self._ip_addr} is already in use"
 
