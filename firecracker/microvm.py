@@ -63,7 +63,7 @@ class MicroVM:
                  vcpu: int = None, memory: int = None, ip_addr: str = None,
                  mmds_enabled: bool = None, mmds_ip: str = None, user_data: str = None, user_data_file: str = None,
                  labels: dict = None, expose_ports: bool = False, host_port: int = None, dest_port: int = None,
-                 verbose: bool = False, level: str = "INFO") -> None:
+                 vsock_enabled: bool = False, vsock_guest_cid: int = None, verbose: bool = False, level: str = "INFO") -> None:
         self._microvm_id = generate_id()
         self._microvm_name = generate_name() if name is None else name
 
@@ -156,11 +156,19 @@ class MicroVM:
             self._overlayfs_name = os.path.basename(self._overlayfs_file.replace('./', ''))
             self._overlayfs_dir = os.path.join(self._rootfs_dir, self._overlayfs_name)
 
+        self._mem_file_path = f"{self._config.snapshot_path}/{self._microvm_id}/memory"
+        self._snapshot_path = f"{self._config.snapshot_path}/{self._microvm_id}/snapshot"
+
         self._ssh_client = SSHClient()
         self._expose_ports = expose_ports
         self._host_ip = get_public_ip()
         self._host_port = self._parse_ports(host_port)
         self._dest_port = self._parse_ports(dest_port)
+
+        self._vsock_enabled = vsock_enabled or self._config.vsock_enabled
+        self._vsock_guest_cid = vsock_guest_cid or self._config.vsock_guest_cid
+        self._vsock_uds_path = f"{self._config.data_path}/{self._microvm_id}/v.sock"
+
         self._api = self._vmm.get_api(self._microvm_id)
 
     @staticmethod
@@ -265,8 +273,13 @@ class MicroVM:
         except Exception as e:
             raise VMMError(f"Failed to build rootfs from Docker image: {str(e)}")
 
-    def create(self) -> dict:
+    def create(self, snapshot: bool = False, memory_path: str = None, snapshot_path: str = None) -> dict:
         """Create a new microVM.
+
+        Args:
+            snapshot (bool, optional): Whether to create a snapshot of the microVM.
+            memory_path (str, optional): Path to the memory file.
+            snapshot_path (str, optional): Path to the snapshot file.
 
         Returns:
             dict: Status message indicating the result of the create operation.
@@ -301,14 +314,23 @@ class MicroVM:
             )
 
             self._run_firecracker()
-            self._configure_vmm_boot_source()
-            self._configure_vmm_root_drive()
-            self._configure_vmm_resources()
-            self._configure_vmm_network()
-            if self._mmds_enabled:
-                self._configure_vmm_mmds()
+            if snapshot:
+                if not memory_path or not snapshot_path:
+                    raise ValueError("memory_path and snapshot_path are required when snapshot is True")
+                self.snapshot(id=self._microvm_id, action="load", memory_path=memory_path, snapshot_path=snapshot_path)
+            else:
+                self._configure_vmm_boot_source()
+                self._configure_vmm_root_drive()
+                self._configure_vmm_resources()
+                self._configure_vmm_network()
+                if self._mmds_enabled:
+                    self._configure_vmm_mmds()
+                if self._vsock_enabled:
+                    self._configure_vmm_vsock()
 
             self._api.actions.put(action_type="InstanceStart")
+            if self._config.verbose:
+                self._logger.info(f"VMM {self._microvm_id} started")
 
             if self._expose_ports:
                 if not self._host_port or not self._dest_port:
@@ -576,6 +598,64 @@ class MicroVM:
         except Exception as e:
             raise VMMError(f"Failed to configure port forwarding: {str(e)}")
 
+    def snapshot(self, id=None, action: str = None, memory_path: str = None, snapshot_path: str = None):
+        """Create a snapshot of the microVM.
+        
+        Args:
+            id (str, optional): ID of the VMM to create a snapshot of. If not provided, uses the last created VMM.
+            action (str, optional): Action to perform on the snapshot.
+            memory_path (str, optional): Path to the memory file. If not provided, uses the default memory path.
+            snapshot_path (str, optional): Path to the snapshot file. If not provided, uses the default snapshot path.
+        """
+        try:
+            id = id if id else self._microvm_id
+
+            if action == "create":
+                if self._vmm.get_vmm_state(id) == "Paused":
+                    if self._config.verbose:
+                        self._logger.info(f"VMM {id} is already paused")
+                else:
+                    if self._config.verbose:
+                        self._logger.info(f"Pausing VMM {id} to create snapshot")
+                    self._vmm.update_vmm_state(id, "Paused")
+
+                if not os.path.exists(f"{self._config.snapshot_path}/{id}"):
+                    os.makedirs(f"{self._config.snapshot_path}/{id}", mode=0o755)
+                    self._logger.info(f"Created VMM {id} snapshot directory")
+
+                self._api.create_snapshot.put(
+                    mem_file_path=self._mem_file_path if memory_path is None else memory_path,
+                    snapshot_path=self._snapshot_path if snapshot_path is None else snapshot_path,
+                )
+                if self._config.verbose:
+                    self._logger.debug(f"Snapshot created at {self._snapshot_path}")
+                    self._logger.info(f"Snapshot created for VMM {id}")
+                self._vmm.update_vmm_state(id, "Resumed")
+            elif action == "load":
+                self._api.load_snapshot.put(
+                    enable_diff_snapshots=True,
+                    mem_backend={
+                        "backend_type": "File",
+                        "backend_path": memory_path if memory_path is not None else self._mem_file_path
+                    },
+                    snapshot_path=snapshot_path if snapshot_path is not None else self._snapshot_path,
+                    resume_vm=True,
+                    network_overrides=[
+                        {
+                            "iface_id": self._iface_name,
+                            "host_dev_name": self._host_dev_name
+                        }
+                    ]
+                )
+                if self._config.verbose:
+                    self._logger.debug(f"Snapshot loaded from {snapshot_path if snapshot_path is not None else self._snapshot_path}")
+                    self._logger.info(f"Snapshot loaded for VMM {id}")
+            else:
+                raise ValueError("Invalid action. Must be 'create' or 'load'")
+
+        except Exception as e:
+            raise VMMError(f"Failed to create snapshot: {str(e)}")
+
     def _parse_ports(self, port_value, default_value=None):
         """Parse port values from various input formats.
 
@@ -618,7 +698,7 @@ class MicroVM:
             str: Boot arguments
         """
         common_args = (
-            "console=ttyS0 reboot=k panic=1 "
+            "console=ttyS0 reboot=k pci=off panic=1 "
             f"ip={self._ip_addr}::{self._gateway_ip}:255.255.255.0:"
             f"{self._microvm_name}:{self._iface_name}:on"
         )
@@ -669,7 +749,7 @@ class MicroVM:
             self._api.drive.put(
                 drive_id="rootfs",
                 path_on_host=rootfs_path,
-                is_root_device=True,
+                is_root_device=True if self._initrd_file is None else False,
                 is_read_only=self._overlayfs is True
             )
             if self._config.verbose:
@@ -766,6 +846,27 @@ class MicroVM:
 
         except Exception as e:
             raise ConfigurationError(f"Failed to configure MMDS: {str(e)}")
+
+    def _configure_vmm_vsock(self):
+        """Configure Vsock if enabled.
+
+        Vsock is a communication channel between the microVM and the host.
+        """
+        try:
+            if self._config.verbose:
+                self._logger.debug("Vsock is " + ("disabled" if not self._vsock_enabled else "enabled, configuring Vsock..."))
+
+            self._api.vsock.put(
+                guest_cid=self._vsock_guest_cid,
+                uds_path=self._vsock_uds_path
+            )
+
+            if self._config.verbose:
+                self._logger.debug(f"Vsock configured with guest CID {self._vsock_guest_cid} and UDS path {self._vsock_uds_path}")
+                self._logger.info("Vsock configured")
+
+        except Exception as e:
+            raise ConfigurationError(f"Failed to configure Vsock: {str(e)}")
 
     def _run_firecracker(self):
         """Run the Firecracker process.
@@ -896,19 +997,29 @@ class MicroVM:
 
     def _is_valid_docker_image(self, name: str) -> bool:
         """
-        Check if a Docker image is valid using Docker module only
+        Check if a Docker image is valid by checking both local images and registry
         
         Args:
             name (str): Docker image name (e.g., 'alpine', 'nginx:latest')
         
         Returns:
-            bool: True if image exists in registry, False otherwise
+            bool: True if image exists locally or in registry, False otherwise
         """
         try:
-            inspect = self._docker.api.inspect_distribution(name)
-            if inspect:
-                return True
-            else:
+            try:
+                local_image = self._docker.images.get(name)
+                if local_image:
+                    return True
+            except docker.errors.ImageNotFound:
+                pass
+            
+            try:
+                inspect = self._docker.api.inspect_distribution(name)
+                if inspect:
+                    return True
+                else:
+                    return False
+            except Exception:
                 return False
 
         except Exception as e:

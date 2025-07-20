@@ -1,8 +1,8 @@
 import requests
-from http import HTTPStatus
 import urllib.parse
-from requests_unixsocket import UnixAdapter
+from http import HTTPStatus
 from .exceptions import APIError
+from requests_unixsocket import UnixAdapter
 
 DEFAULT_SCHEME = "http://"
 
@@ -145,6 +145,9 @@ class Api:
         self.network = Resource(self, "/network-interfaces", "iface_id")
         self.mmds = Resource(self, "/mmds")
         self.mmds_config = Resource(self, "/mmds/config")
+        self.create_snapshot = Resource(self, "/snapshot/create")
+        self.load_snapshot = Resource(self, "/snapshot/load")
+        self.vsock = Resource(self, "/vsock")
 
     def close(self):
         """Close the session to release resources."""
