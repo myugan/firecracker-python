@@ -127,6 +127,7 @@ class VMMManager:
                 if pid and pid in running_pids:
                     network_key = f"tap_{vmm_id}"
                     network_info = config_data.get('Network', {}).get(network_key, {})
+                    ports_info = config_data.get('Ports', {})
                     
                     vmm_info = {
                         "id": config_data.get('ID', vmm_id),
@@ -134,7 +135,9 @@ class VMMManager:
                         "pid": pid,
                         "ip_addr": network_info.get("IPAddress", ''),
                         "state": 'Running' if config_data.get('State', {}).get('Running', False) else 'Paused',
-                        "created_at": config_data.get('CreatedAt', '')
+                        "created_at": config_data.get('CreatedAt', ''),
+                        "ports": ports_info,
+                        "labels": config_data.get('Labels', {})
                     }
                     vmm_list.append(vmm_info)
                     
@@ -236,7 +239,7 @@ class VMMManager:
             response = api.vm.patch(state=state)
 
             if self._config.verbose:
-                self._logger.info(
+                self._logger.debug(
                     f"Changed VMM {id} state response: {response}"
                 )
 
