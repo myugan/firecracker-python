@@ -14,7 +14,7 @@ def check_firecracker_binary():
         binary_path = config.binary_path
 
         if not os.path.exists(binary_path):
-            raise ConfigurationError(f"Firecracker binary not found at: {binary_path}")
+            raise ConfigurationError(f"Firecracker binary not found, please install Firecracker")
 
         if not os.access(binary_path, os.X_OK):
             raise ConfigurationError(f"Firecracker binary is not executable at: {binary_path}")
@@ -35,6 +35,11 @@ def create_firecracker_directory():
         if not os.path.exists(data_path):
             os.makedirs(data_path, mode=0o755)
             print(f"Created Firecracker data directory at: {data_path}")
+
+        snapshot_path = config.snapshot_path
+        if not os.path.exists(snapshot_path):
+            os.makedirs(snapshot_path, mode=0o755)
+            print(f"Created Firecracker snapshot directory at: {snapshot_path}")
 
     except Exception as e:
         raise ConfigurationError(f"Failed to create Firecracker data directory: {str(e)}") from e
