@@ -101,9 +101,8 @@ class MicroVM:
         self._mac_addr = generate_mac_address()
         if ip_addr:
             validate_ip_address(ip_addr)
+            self._network.detect_cidr_conflict(ip_addr, 24)
             self._ip_addr = ip_addr
-            if self._network.detect_cidr_conflict(self._ip_addr, 24):
-                self._ip_addr = self._network.suggest_non_conflicting_ip(self._ip_addr, 24)
         else:
             self._ip_addr = self._config.ip_addr
         self._gateway_ip = self._network.get_gateway_ip(self._ip_addr)
@@ -149,7 +148,7 @@ class MicroVM:
             base_rootfs_name = os.path.basename(self._base_rootfs.replace('./', ''))
             self._rootfs_file = os.path.join(self._rootfs_dir, base_rootfs_name)
 
-        self._rootfs_size = self._config.rootfs_size or rootfs_size
+        self._rootfs_size = rootfs_size or self._config.rootfs_size
         self._overlayfs = overlayfs or self._config.overlayfs
         if self._overlayfs:
             self._overlayfs_file = overlayfs_file or os.path.join(self._rootfs_dir, "overlayfs.ext4")

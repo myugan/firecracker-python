@@ -885,10 +885,10 @@ class NetworkManager:
         try:
             new_network = IPv4Network(f"{ip_addr}/{prefix_len}", strict=False)
 
-            interfaces = self._ipr.get_links()
+            ifaces = self._ipr.get_links()
             
-            for interface in interfaces:
-                idx = interface['index']
+            for iface in ifaces:
+                idx = iface['index']
                 addresses = self._ipr.get_addr(index=idx)
                 
                 for addr in addresses:
@@ -909,8 +909,8 @@ class NetworkManager:
                                         f"CIDR conflict detected: {new_network} "
                                         f"overlaps with existing {existing_network}"
                                     )
-                                return True
-            return False
+                                return False
+            return True
             
         except (AddressValueError, ValueError) as e:
             raise NetworkError(f"Invalid IP address format: {str(e)}")
