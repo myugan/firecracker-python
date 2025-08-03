@@ -33,26 +33,40 @@ class ProcessManager:
         try:
             cmd = [self._config.binary_path] + args
 
+            log_path = f"{self._config.data_path}/{id}/firecracker.log"
+            pid_path = f"{self._config.data_path}/{id}/firecracker.pid"
+
             process = subprocess.Popen(
                 cmd,
-                stdout=open(f"{self._config.data_path}/{id}/firecracker.log", "w"),
+                stdout=open(log_path, "w"),
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True
             )
             
-            if process.poll() is None:
-                proc = psutil.Process(process.pid)
-                if proc.status() == psutil.STATUS_ZOMBIE:
-                    raise ProcessError("Firecracker process became defunct")
+            time.sleep(0.2)
 
-                with open(f"{self._config.data_path}/{id}/firecracker.pid", "w") as f:
-                    f.write(str(process.pid))
-                    
-                if self._logger.verbose:
-                    self._logger.debug(f"Firecracker process started with PID: {process.pid}")
+            if process.poll() is not None:
+                raise ProcessError("Firecracker process exited during startup")
 
-                return process.pid
+            proc = psutil.Process(process.pid)
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                raise ProcessError("Firecracker process became defunct")
+
+            try:
+                proc.wait(timeout=1)
+            except psutil.TimeoutExpired:
+                pass
+            except psutil.NoSuchProcess:
+                raise ProcessError("Firecracker process disappeared during startup")
+
+            with open(pid_path, "w") as f:
+                f.write(str(process.pid))
+                
+            if self._logger.verbose:
+                self._logger.debug(f"Firecracker process started with PID: {process.pid}")
+
+            return process.pid
 
         except Exception as e:
             raise ProcessError(f"Failed to start Firecracker: {str(e)}")
