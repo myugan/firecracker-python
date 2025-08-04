@@ -131,67 +131,34 @@ class ProcessManager:
         try:
             if os.path.exists(f"{self._config.data_path}/{id}/firecracker.pid"):
                 with open(f"{self._config.data_path}/{id}/firecracker.pid", "r") as f:
-                    pid = int(f.read().strip())
+                    original_pid = int(f.read().strip())
 
-                # Try graceful shutdown first
-                try:
-                    os.kill(pid, 15)  # SIGTERM
-                    time.sleep(0.5)
-                except OSError as e:
-                    if e.errno == 3:  # ESRCH - No such process
-                        if self._logger.verbose:
-                            self._logger.info(
-                                f"Firecracker process {pid} already terminated"
-                            )
-                    else:
-                        raise ProcessError(
-                            f"Failed to send SIGTERM to process {pid}: {e}"
+                # Try to stop using the PID from file
+                if self._try_stop_process(original_pid, id):
+                    return True
+
+                # If PID-based stop failed, search for actual running process
+                if self._logger.verbose:
+                    self._logger.info(
+                        f"PID {original_pid} not found, searching for running Firecracker process for VM {id}"
+                    )
+
+                actual_pid = self._find_running_process(id)
+                if actual_pid:
+                    if self._logger.verbose:
+                        self._logger.info(
+                            f"Found running Firecracker process {actual_pid} for VM {id}"
+                        )
+                    if self._try_stop_process(actual_pid, id):
+                        return True
+                else:
+                    if self._logger.verbose:
+                        self._logger.info(
+                            f"No running Firecracker process found for VM {id}"
                         )
 
-                # Check if process is still running
-                try:
-                    os.kill(pid, 0)  # Check if process exists
-                    # Process still running, try force kill
-                    os.kill(pid, 9)  # SIGKILL
-                    time.sleep(0.2)
-
-                    # Verify process is actually killed
-                    try:
-                        os.kill(pid, 0)
-                        raise ProcessError(
-                            f"Firecracker process {pid} still running after SIGKILL"
-                        )
-                    except OSError:
-                        if self._logger.verbose:
-                            self._logger.info(f"Firecracker process {pid} force killed")
-
-                except OSError as e:
-                    if e.errno == 3:  # ESRCH - No such process
-                        if self._logger.verbose:
-                            self._logger.info(f"Firecracker process {pid} terminated")
-                    else:
-                        raise ProcessError(f"Failed to kill process {pid}: {e}")
-
-                # Clean up PID file
-                try:
-                    os.remove(f"{self._config.data_path}/{id}/firecracker.pid")
-                    if self._logger.verbose:
-                        self._logger.debug(f"Removed PID file for process {pid}")
-                except OSError as e:
-                    if self._logger.verbose:
-                        self._logger.warning(f"Failed to remove PID file: {e}")
-
-                # Clean up socket file
-                socket_path = f"{self._config.data_path}/{id}/firecracker.socket"
-                if os.path.exists(socket_path):
-                    try:
-                        os.remove(socket_path)
-                        if self._logger.verbose:
-                            self._logger.debug(f"Removed socket file: {socket_path}")
-                    except OSError as e:
-                        if self._logger.verbose:
-                            self._logger.warning(f"Failed to remove socket file: {e}")
-
+                # Clean up files even if no process found
+                self._cleanup_files(id)
                 return True
             else:
                 if self._logger.verbose:
@@ -202,6 +169,125 @@ class ProcessManager:
             if self._logger.verbose:
                 self._logger.error(f"Error stopping Firecracker: {e}")
             raise ProcessError(f"Failed to stop Firecracker {id}: {str(e)}")
+
+    def _try_stop_process(self, pid: int, id: str) -> bool:
+        """Try to stop a specific process by PID.
+
+        Args:
+            pid (int): Process ID to stop
+            id (str): VM ID for logging
+
+        Returns:
+            bool: True if process was successfully stopped, False otherwise
+        """
+        try:
+            # Try graceful shutdown first
+            try:
+                os.kill(pid, 15)  # SIGTERM
+                time.sleep(0.5)
+            except OSError as e:
+                if e.errno == 3:  # ESRCH - No such process
+                    if self._logger.verbose:
+                        self._logger.info(
+                            f"Firecracker process {pid} already terminated"
+                        )
+                    return True
+                else:
+                    raise ProcessError(f"Failed to send SIGTERM to process {pid}: {e}")
+
+            # Check if process is still running
+            try:
+                os.kill(pid, 0)  # Check if process exists
+                # Process still running, try force kill
+                os.kill(pid, 9)  # SIGKILL
+                time.sleep(0.2)
+
+                # Verify process is actually killed
+                try:
+                    os.kill(pid, 0)
+                    raise ProcessError(
+                        f"Firecracker process {pid} still running after SIGKILL"
+                    )
+                except OSError:
+                    if self._logger.verbose:
+                        self._logger.info(f"Firecracker process {pid} force killed")
+                    return True
+
+            except OSError as e:
+                if e.errno == 3:  # ESRCH - No such process
+                    if self._logger.verbose:
+                        self._logger.info(f"Firecracker process {pid} terminated")
+                    return True
+                else:
+                    raise ProcessError(f"Failed to kill process {pid}: {e}")
+
+        except Exception as e:
+            if self._logger.verbose:
+                self._logger.warning(f"Failed to stop process {pid}: {e}")
+            return False
+
+    def _find_running_process(self, id: str) -> int:
+        """Find the actual running Firecracker process for a given VM ID.
+
+        Args:
+            id (str): The VM ID to search for
+
+        Returns:
+            int: Process ID if found, None otherwise
+        """
+        try:
+            socket_path = f"{self._config.data_path}/{id}/firecracker.socket"
+
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                try:
+                    if proc.info["name"] == "firecracker":
+                        cmdline = proc.info["cmdline"]
+                        if cmdline and len(cmdline) > 1:
+                            # Check if this process uses the same socket path
+                            for i, arg in enumerate(cmdline):
+                                if arg == "--api-sock" and i + 1 < len(cmdline):
+                                    if cmdline[i + 1] == socket_path:
+                                        return proc.info["pid"]
+                except (
+                    psutil.NoSuchProcess,
+                    psutil.AccessDenied,
+                    psutil.ZombieProcess,
+                ):
+                    continue
+
+        except Exception as e:
+            if self._logger.verbose:
+                self._logger.warning(f"Error searching for running process: {e}")
+
+        return None
+
+    def _cleanup_files(self, id: str):
+        """Clean up PID and socket files for a VM.
+
+        Args:
+            id (str): The VM ID
+        """
+        # Clean up PID file
+        pid_file = f"{self._config.data_path}/{id}/firecracker.pid"
+        if os.path.exists(pid_file):
+            try:
+                os.remove(pid_file)
+                if self._logger.verbose:
+                    self._logger.debug(f"Removed PID file for VM {id}")
+            except OSError as e:
+                if self._logger.verbose:
+                    self._logger.warning(f"Failed to remove PID file: {e}")
+
+        # Clean up socket file
+        socket_path = f"{self._config.data_path}/{id}/firecracker.socket"
+        if os.path.exists(socket_path):
+            try:
+                os.remove(socket_path)
+                if self._logger.verbose:
+                    self._logger.debug(f"Removed socket file: {socket_path}")
+            except OSError as e:
+                if self._logger.verbose:
+                    self._logger.warning(f"Failed to remove socket file: {e}")
 
     def get_pid(self, id: str) -> tuple:
         """Get the PID of the Firecracker process.
