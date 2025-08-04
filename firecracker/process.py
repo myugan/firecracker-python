@@ -6,7 +6,13 @@ from datetime import datetime
 from firecracker.logger import Logger
 from firecracker.config import MicroVMConfig
 from firecracker.exceptions import ProcessError
-from tenacity import retry, stop_after_delay, wait_fixed, retry_if_exception_type
+from tenacity import (
+    retry,
+    stop_after_delay,
+    wait_fixed,
+    retry_if_exception_type,
+    stop_after_attempt,
+)
 
 
 class ProcessManager:
@@ -19,14 +25,14 @@ class ProcessManager:
 
     def start(self, id: str, args: list) -> str:
         """Start a Firecracker process.
-        
+
         Args:
             id (str): The ID of the Firecracker VM
             args (list): List of command arguments
-            
+
         Returns:
             str: Process ID if successful
-            
+
         Raises:
             ProcessError: If process fails to start or becomes defunct
         """
@@ -41,9 +47,9 @@ class ProcessManager:
                 stdout=open(log_path, "w"),
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
-                start_new_session=True
+                start_new_session=True,
             )
-            
+
             time.sleep(0.2)
 
             if process.poll() is not None:
@@ -62,9 +68,11 @@ class ProcessManager:
 
             with open(pid_path, "w") as f:
                 f.write(str(process.pid))
-                
+
             if self._logger.verbose:
-                self._logger.debug(f"Firecracker process started with PID: {process.pid}")
+                self._logger.debug(
+                    f"Firecracker process started with PID: {process.pid}"
+                )
 
             return process.pid
 
@@ -74,7 +82,7 @@ class ProcessManager:
     @retry(
         stop=stop_after_delay(3),
         wait=wait_fixed(0.5),
-        retry=retry_if_exception_type(ProcessError)
+        retry=retry_if_exception_type(ProcessError),
     )
     def is_running(self, id: str) -> bool:
         """Check if Firecracker is running."""
@@ -103,52 +111,107 @@ class ProcessManager:
                 self._logger.error(f"Error checking status: {e}")
             return False
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_fixed(0.5),
+        retry=retry_if_exception_type((ProcessError, OSError)),
+    )
     def stop(self, id: str) -> bool:
-        """Stop Firecracker."""
+        """Stop Firecracker with retry mechanism.
+
+        Args:
+            id (str): The ID of the Firecracker VM
+
+        Returns:
+            bool: True if successfully stopped, False otherwise
+
+        Raises:
+            ProcessError: If process fails to stop after retries
+        """
         try:
             if os.path.exists(f"{self._config.data_path}/{id}/firecracker.pid"):
                 with open(f"{self._config.data_path}/{id}/firecracker.pid", "r") as f:
                     pid = int(f.read().strip())
 
-                os.kill(pid, 15)
-                time.sleep(0.5)
-
+                # Try graceful shutdown first
                 try:
-                    os.kill(pid, 0)
-                    os.kill(pid, 9)
-                    if self._logger.verbose:
-                        self._logger.info(f"Firecracker process {pid} force killed")
-                except OSError:
-                    if self._logger.verbose:
-                        self._logger.info(f"Firecracker process {pid} terminated")
-                
-                os.remove(f"{self._config.data_path}/{id}/firecracker.pid")
-                if self._logger.verbose:
-                    self._logger.debug(f"Removed PID file: {pid}")
+                    os.kill(pid, 15)  # SIGTERM
+                    time.sleep(0.5)
+                except OSError as e:
+                    if e.errno == 3:  # ESRCH - No such process
+                        if self._logger.verbose:
+                            self._logger.info(
+                                f"Firecracker process {pid} already terminated"
+                            )
+                    else:
+                        raise ProcessError(
+                            f"Failed to send SIGTERM to process {pid}: {e}"
+                        )
 
-                if os.path.exists(f"{self._config.data_path}/{id}/firecracker.socket"):
-                    os.remove(f"{self._config.data_path}/{id}/firecracker.socket")
+                # Check if process is still running
+                try:
+                    os.kill(pid, 0)  # Check if process exists
+                    # Process still running, try force kill
+                    os.kill(pid, 9)  # SIGKILL
+                    time.sleep(0.2)
+
+                    # Verify process is actually killed
+                    try:
+                        os.kill(pid, 0)
+                        raise ProcessError(
+                            f"Firecracker process {pid} still running after SIGKILL"
+                        )
+                    except OSError:
+                        if self._logger.verbose:
+                            self._logger.info(f"Firecracker process {pid} force killed")
+
+                except OSError as e:
+                    if e.errno == 3:  # ESRCH - No such process
+                        if self._logger.verbose:
+                            self._logger.info(f"Firecracker process {pid} terminated")
+                    else:
+                        raise ProcessError(f"Failed to kill process {pid}: {e}")
+
+                # Clean up PID file
+                try:
+                    os.remove(f"{self._config.data_path}/{id}/firecracker.pid")
+                    if self._logger.verbose:
+                        self._logger.debug(f"Removed PID file for process {pid}")
+                except OSError as e:
+                    if self._logger.verbose:
+                        self._logger.warning(f"Failed to remove PID file: {e}")
+
+                # Clean up socket file
+                socket_path = f"{self._config.data_path}/{id}/firecracker.socket"
+                if os.path.exists(socket_path):
+                    try:
+                        os.remove(socket_path)
+                        if self._logger.verbose:
+                            self._logger.debug(f"Removed socket file: {socket_path}")
+                    except OSError as e:
+                        if self._logger.verbose:
+                            self._logger.warning(f"Failed to remove socket file: {e}")
 
                 return True
             else:
                 if self._logger.verbose:
-                    self._logger.info("Firecracker is not running")
+                    self._logger.info("Firecracker is not running (no PID file)")
                 return False
 
         except Exception as e:
             if self._logger.verbose:
                 self._logger.error(f"Error stopping Firecracker: {e}")
-            return False
+            raise ProcessError(f"Failed to stop Firecracker {id}: {str(e)}")
 
     def get_pid(self, id: str) -> tuple:
         """Get the PID of the Firecracker process.
-        
+
         Args:
             id (str): The ID of the Firecracker VM
-            
+
         Returns:
             tuple: (pid, create_time) if process is found and running
-            
+
         Raises:
             ProcessError: If the process is not found or not running
         """
@@ -156,7 +219,7 @@ class ProcessManager:
             pid_file = f"{self._config.data_path}/{id}/firecracker.pid"
             if not os.path.exists(pid_file):
                 raise ProcessError(f"No PID file found for VM {id}")
-                
+
             with open(pid_file, "r") as f:
                 pid = int(f.read().strip())
 
@@ -166,16 +229,18 @@ class ProcessManager:
                     os.remove(pid_file)
                     raise ProcessError(f"Firecracker process {pid} is not running")
 
-                if process.name() != 'firecracker':
+                if process.name() != "firecracker":
                     os.remove(pid_file)
                     raise ProcessError(f"Process {pid} is not a Firecracker process")
 
-                create_time = datetime.fromtimestamp(
-                    process.create_time()
-                ).strftime('%Y-%m-%d %H:%M:%S')
-                
+                create_time = datetime.fromtimestamp(process.create_time()).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+
                 if self._logger.verbose:
-                    self._logger.debug(f"Found Firecracker process {pid} created at {create_time}")
+                    self._logger.debug(
+                        f"Found Firecracker process {pid} created at {create_time}"
+                    )
 
                 return pid, create_time
 
@@ -188,32 +253,36 @@ class ProcessManager:
 
             except psutil.TimeoutExpired:
                 raise ProcessError(f"Timeout while checking process {pid}")
-                
+
         except Exception as e:
             raise ProcessError(f"Failed to get Firecracker PID: {str(e)}")
 
     def get_pids(self) -> list:
         """
         Get all PIDs of the Firecracker processes that have --api-sock parameter.
-        
+
         Returns:
             list: List of process IDs (integers)
         """
         pid_list = []
-        
+
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
                 try:
-                    if proc.info['name'] == 'firecracker':
-                        cmdline = proc.info['cmdline']
-                        if cmdline and len(cmdline) > 1 and '--api-sock' in cmdline:
-                            pid_list.append(proc.info['pid'])
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    if proc.info["name"] == "firecracker":
+                        cmdline = proc.info["cmdline"]
+                        if cmdline and len(cmdline) > 1 and "--api-sock" in cmdline:
+                            pid_list.append(proc.info["pid"])
+                except (
+                    psutil.NoSuchProcess,
+                    psutil.AccessDenied,
+                    psutil.ZombieProcess,
+                ):
                     continue
 
         except Exception as e:
             raise ProcessError(f"Failed to get Firecracker processes: {str(e)}")
-            
+
         return pid_list
 
     @staticmethod
