@@ -181,7 +181,7 @@ class ProcessManager:
             bool: True if process was successfully stopped
 
         Raises:
-            ProcessError: If process fails to stop after retries
+            ProcessError: If process fails to stop
         """
         try:
             os.kill(pid, 15)  # SIGTERM
