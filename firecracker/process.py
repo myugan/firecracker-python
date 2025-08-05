@@ -178,53 +178,47 @@ class ProcessManager:
             id (str): VM ID for logging
 
         Returns:
-            bool: True if process was successfully stopped, False otherwise
+            bool: True if process was successfully stopped
+
+        Raises:
+            ProcessError: If process fails to stop
         """
         try:
-            # Try graceful shutdown first
+            os.kill(pid, 15)  # SIGTERM
+            time.sleep(0.5)
+        except OSError as e:
+            if e.errno == 3:  # ESRCH - No such process
+                if self._logger.verbose:
+                    self._logger.info(f"Firecracker process {pid} already terminated")
+                return True
+            else:
+                raise ProcessError(f"Failed to send SIGTERM to process {pid}: {e}")
+
+        # Check if process is still running
+        try:
+            os.kill(pid, 0)  # Check if process exists
+            # Process still running, try force kill
+            os.kill(pid, 9)  # SIGKILL
+            time.sleep(0.2)
+
+            # Verify process is actually killed
             try:
-                os.kill(pid, 15)  # SIGTERM
-                time.sleep(0.5)
-            except OSError as e:
-                if e.errno == 3:  # ESRCH - No such process
-                    if self._logger.verbose:
-                        self._logger.info(
-                            f"Firecracker process {pid} already terminated"
-                        )
-                    return True
-                else:
-                    raise ProcessError(f"Failed to send SIGTERM to process {pid}: {e}")
+                os.kill(pid, 0)
+                raise ProcessError(
+                    f"Firecracker process {pid} still running after SIGKILL"
+                )
+            except OSError:
+                if self._logger.verbose:
+                    self._logger.info(f"Firecracker process {pid} force killed")
+                return True
 
-            # Check if process is still running
-            try:
-                os.kill(pid, 0)  # Check if process exists
-                # Process still running, try force kill
-                os.kill(pid, 9)  # SIGKILL
-                time.sleep(0.2)
-
-                # Verify process is actually killed
-                try:
-                    os.kill(pid, 0)
-                    raise ProcessError(
-                        f"Firecracker process {pid} still running after SIGKILL"
-                    )
-                except OSError:
-                    if self._logger.verbose:
-                        self._logger.info(f"Firecracker process {pid} force killed")
-                    return True
-
-            except OSError as e:
-                if e.errno == 3:  # ESRCH - No such process
-                    if self._logger.verbose:
-                        self._logger.info(f"Firecracker process {pid} terminated")
-                    return True
-                else:
-                    raise ProcessError(f"Failed to kill process {pid}: {e}")
-
-        except Exception as e:
-            if self._logger.verbose:
-                self._logger.warning(f"Failed to stop process {pid}: {e}")
-            return False
+        except OSError as e:
+            if e.errno == 3:  # ESRCH - No such process
+                if self._logger.verbose:
+                    self._logger.info(f"Firecracker process {pid} terminated")
+                return True
+            else:
+                raise ProcessError(f"Failed to kill process {pid}: {e}")
 
     def _find_running_process(self, id: str) -> int:
         """Find the actual running Firecracker process for a given VM ID.
