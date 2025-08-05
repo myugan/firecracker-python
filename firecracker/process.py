@@ -178,7 +178,10 @@ class ProcessManager:
             id (str): VM ID for logging
 
         Returns:
-            bool: True if process was successfully stopped, False otherwise
+            bool: True if process was successfully stopped
+
+        Raises:
+            ProcessError: If process fails to stop after retries
         """
         try:
             os.kill(pid, 15)  # SIGTERM
