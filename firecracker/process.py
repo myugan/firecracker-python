@@ -54,7 +54,7 @@ class ProcessManager:
                 preexec_fn=lambda: os.setpgid(0, parent_pgid),
             )
 
-            time.sleep(0.2)
+            time.sleep(0.5)
 
             if process.poll() is not None:
                 raise ProcessError("Firecracker process exited during startup")
@@ -189,23 +189,12 @@ class ProcessManager:
         Raises:
             ProcessError: If process fails to stop
         """
-        try:
-            os.kill(pid, 15)  # SIGTERM
-            time.sleep(0.5)
-        except OSError as e:
-            if e.errno == 3:  # ESRCH - No such process
-                if self._logger.verbose:
-                    self._logger.info(f"Firecracker process {pid} already terminated")
-                return True
-            else:
-                raise ProcessError(f"Failed to send SIGTERM to process {pid}: {e}")
-
         # Check if process is still running
         try:
             os.kill(pid, 0)  # Check if process exists
             # Process still running, try force kill
             os.kill(pid, 9)  # SIGKILL
-            time.sleep(0.2)
+            time.sleep(1)
 
             # Verify process is actually killed
             try:
