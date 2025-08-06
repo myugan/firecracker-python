@@ -117,7 +117,7 @@ class ProcessManager:
 
     @retry(
         stop=stop_after_attempt(5),
-        wait=wait_fixed(0.5),
+        wait=wait_fixed(1),
         retry=retry_if_exception_type((ProcessError, OSError)),
     )
     def stop(self, id: str) -> bool:
@@ -167,6 +167,9 @@ class ProcessManager:
                 self._cleanup_files(id)
                 return True
             else:
+                # Clean up files even if no process found
+                self._cleanup_files(id)
+
                 if self._logger.verbose:
                     self._logger.info("Firecracker is not running (no PID file)")
                 return False
