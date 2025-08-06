@@ -192,6 +192,21 @@ class ProcessManager:
         Raises:
             ProcessError: If process fails to stop
         """
+
+        def wait_for_process_death(pid: int, timeout: float = 5.0) -> bool:
+            """Wait for process to die with timeout."""
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                try:
+                    os.kill(pid, 0)  # Check if process exists
+                    time.sleep(0.1)  # Wait 100ms before next check
+                except OSError as e:
+                    if e.errno == 3:  # ESRCH - No such process
+                        return True  # Process is dead
+                    else:
+                        raise ProcessError(f"Error checking process {pid}: {e}")
+            return False  # Timeout reached
+
         try:
             # First check if process exists
             os.kill(pid, 0)
@@ -206,7 +221,24 @@ class ProcessManager:
         # Process exists, try graceful shutdown first
         try:
             os.kill(pid, 15)  # SIGTERM
-            time.sleep(0.5)
+            if self._logger.verbose:
+                self._logger.debug(
+                    f"Sent SIGTERM to process {pid}, waiting for termination..."
+                )
+
+            # Wait for process to die after SIGTERM
+            if wait_for_process_death(pid):
+                if self._logger.verbose:
+                    self._logger.info(
+                        f"Firecracker process {pid} terminated after SIGTERM"
+                    )
+                return True
+            else:
+                if self._logger.verbose:
+                    self._logger.warning(
+                        f"Process {pid} did not terminate after SIGTERM, using SIGKILL"
+                    )
+
         except OSError as e:
             if e.errno == 3:  # ESRCH - No such process
                 if self._logger.verbose:
@@ -217,31 +249,31 @@ class ProcessManager:
             else:
                 raise ProcessError(f"Failed to send SIGTERM to process {pid}: {e}")
 
-        # Check if process is still running after SIGTERM
+        # Process still running after SIGTERM, try force kill
         try:
-            os.kill(pid, 0)  # Check if process exists
-            # Process still running, try force kill
             os.kill(pid, 9)  # SIGKILL
-            time.sleep(0.2)
-
-            # Verify process is actually killed
-            try:
-                os.kill(pid, 0)
-                raise ProcessError(
-                    f"Firecracker process {pid} still running after SIGKILL"
+            if self._logger.verbose:
+                self._logger.debug(
+                    f"Sent SIGKILL to process {pid}, waiting for termination..."
                 )
-            except OSError:
+
+            # Wait for process to die after SIGKILL
+            if wait_for_process_death(pid):
                 if self._logger.verbose:
                     self._logger.info(
                         f"Firecracker process {pid} force killed with SIGKILL"
                     )
                 return True
+            else:
+                raise ProcessError(
+                    f"Firecracker process {pid} still running after SIGKILL timeout"
+                )
 
         except OSError as e:
             if e.errno == 3:  # ESRCH - No such process
                 if self._logger.verbose:
                     self._logger.info(
-                        f"Firecracker process {pid} terminated after SIGTERM"
+                        f"Firecracker process {pid} terminated after SIGKILL"
                     )
                 return True
             else:
