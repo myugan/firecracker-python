@@ -42,12 +42,16 @@ class ProcessManager:
             log_path = f"{self._config.data_path}/{id}/firecracker.log"
             pid_path = f"{self._config.data_path}/{id}/firecracker.pid"
 
+            # Get parent's process group
+            parent_pgid = os.getpgid(0)
+
             process = subprocess.Popen(
                 cmd,
                 stdout=open(log_path, "w"),
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
-                start_new_session=True,
+                # Explicitly set to parent's group
+                preexec_fn=lambda: os.setpgid(1, parent_pgid),
             )
 
             time.sleep(0.2)
