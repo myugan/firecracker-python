@@ -139,6 +139,7 @@ class ProcessManager:
 
                 # Try to stop using the PID from file
                 if self._try_stop_process(original_pid, id):
+                    self._cleanup_files(id)
                     return True
 
                 # If PID-based stop failed, search for actual running process
@@ -154,6 +155,7 @@ class ProcessManager:
                             f"Found running Firecracker process {actual_pid} for VM {id}"
                         )
                     if self._try_stop_process(actual_pid, id):
+                        self._cleanup_files(id)
                         return True
                 else:
                     if self._logger.verbose:
