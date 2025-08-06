@@ -192,12 +192,37 @@ class ProcessManager:
         Raises:
             ProcessError: If process fails to stop
         """
-        # Check if process is still running
+        try:
+            # First check if process exists
+            os.kill(pid, 0)
+        except OSError as e:
+            if e.errno == 3:  # ESRCH - No such process
+                if self._logger.verbose:
+                    self._logger.info(f"Firecracker process {pid} already terminated")
+                return True
+            else:
+                raise ProcessError(f"Failed to check process {pid}: {e}")
+
+        # Process exists, try graceful shutdown first
+        try:
+            os.kill(pid, 15)  # SIGTERM
+            time.sleep(0.5)
+        except OSError as e:
+            if e.errno == 3:  # ESRCH - No such process
+                if self._logger.verbose:
+                    self._logger.info(
+                        f"Firecracker process {pid} terminated after SIGTERM"
+                    )
+                return True
+            else:
+                raise ProcessError(f"Failed to send SIGTERM to process {pid}: {e}")
+
+        # Check if process is still running after SIGTERM
         try:
             os.kill(pid, 0)  # Check if process exists
             # Process still running, try force kill
             os.kill(pid, 9)  # SIGKILL
-            time.sleep(1)
+            time.sleep(0.2)
 
             # Verify process is actually killed
             try:
@@ -207,13 +232,17 @@ class ProcessManager:
                 )
             except OSError:
                 if self._logger.verbose:
-                    self._logger.info(f"Firecracker process {pid} force killed")
+                    self._logger.info(
+                        f"Firecracker process {pid} force killed with SIGKILL"
+                    )
                 return True
 
         except OSError as e:
             if e.errno == 3:  # ESRCH - No such process
                 if self._logger.verbose:
-                    self._logger.info(f"Firecracker process {pid} terminated")
+                    self._logger.info(
+                        f"Firecracker process {pid} terminated after SIGTERM"
+                    )
                 return True
             else:
                 raise ProcessError(f"Failed to kill process {pid}: {e}")
