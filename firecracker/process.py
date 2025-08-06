@@ -51,7 +51,7 @@ class ProcessManager:
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 # Explicitly set to parent's group
-                preexec_fn=lambda: os.setpgid(1, parent_pgid),
+                preexec_fn=lambda: os.setpgid(0, parent_pgid),
             )
 
             time.sleep(0.2)
