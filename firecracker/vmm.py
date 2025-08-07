@@ -143,7 +143,7 @@ class VMMManager:
                     
             except (json.JSONDecodeError, IOError) as e:
                 if self._config.verbose:
-                    self._logger.warning(f"Failed to read config for VMM {vmm_id}: {e}")
+                    self._logger.warn(f"Failed to read config for VMM {vmm_id}: {e}")
                 continue
 
         return vmm_list
@@ -217,7 +217,7 @@ class VMMManager:
                         
                 except (json.JSONDecodeError, IOError) as e:
                     if self._config.verbose:
-                        self._logger.warning(f"Failed to read config for VMM {vmm_id}: {e}")
+                        self._logger.warn(f"Failed to read config for VMM {vmm_id}: {e}")
                     continue
 
             return matching_vmm_ids

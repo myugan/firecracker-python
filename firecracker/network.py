@@ -168,7 +168,7 @@ class NetworkManager:
         """
         if not self.is_nftables_available():
             if self._config.verbose:
-                self._logger.warning("Nftables not available, skipping command")
+                self._logger.warn("Nftables not available, skipping command")
             return None, None, None
             
         try:
@@ -193,7 +193,7 @@ class NetworkManager:
         """
         if not self.is_nftables_available():
             if self._config.verbose:
-                self._logger.warning("Nftables not available, skipping NAT rules")
+                self._logger.warn("Nftables not available, skipping NAT rules")
             return
             
         try:
