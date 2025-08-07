@@ -137,10 +137,14 @@ class ProcessManager:
                 with open(f"{self._config.data_path}/{id}/firecracker.pid", "r") as f:
                     original_pid = int(f.read().strip())
 
-                # Try to stop using the PID from file
-                if self._try_stop_process(original_pid, id):
-                    self._cleanup_files(id)
-                    return True
+                try:
+                    # Try to stop using the PID from file
+                    if self._try_stop_process(original_pid, id):
+                        self._cleanup_files(id)
+                        return True
+                except ProcessError as e:
+                    if self._logger.verbose:
+                        self._logger.warn(f"Failed to stop Firecracker (1st attempt): {e}")
 
                 # If PID-based stop failed, search for actual running process
                 if self._logger.verbose:
@@ -199,7 +203,7 @@ class ProcessManager:
             while time.time() - start_time < timeout:
                 try:
                     os.kill(pid, 0)  # Check if process exists
-                    time.sleep(0.1)  # Wait 100ms before next check
+                    time.sleep(1)  # Wait 1 second before next check
                 except OSError as e:
                     if e.errno == 3:  # ESRCH - No such process
                         return True  # Process is dead
@@ -227,7 +231,7 @@ class ProcessManager:
                 )
 
             # Wait for process to die after SIGTERM
-            if wait_for_process_death(pid):
+            if wait_for_process_death(pid, timeout=2):
                 if self._logger.verbose:
                     self._logger.info(
                         f"Firecracker process {pid} terminated after SIGTERM"
@@ -258,7 +262,7 @@ class ProcessManager:
                 )
 
             # Wait for process to die after SIGKILL
-            if wait_for_process_death(pid):
+            if wait_for_process_death(pid, timeout=5):
                 if self._logger.verbose:
                     self._logger.info(
                         f"Firecracker process {pid} force killed with SIGKILL"
