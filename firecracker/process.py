@@ -235,7 +235,7 @@ class ProcessManager:
                 return True
             else:
                 if self._logger.verbose:
-                    self._logger.warning(
+                    self._logger.warn(
                         f"Process {pid} did not terminate after SIGTERM, using SIGKILL"
                     )
 
@@ -310,7 +310,7 @@ class ProcessManager:
 
         except Exception as e:
             if self._logger.verbose:
-                self._logger.warning(f"Error searching for running process: {e}")
+                self._logger.warn(f"Error searching for running process: {e}")
 
         return None
 
@@ -329,7 +329,7 @@ class ProcessManager:
                     self._logger.debug(f"Removed PID file for VM {id}")
             except OSError as e:
                 if self._logger.verbose:
-                    self._logger.warning(f"Failed to remove PID file: {e}")
+                    self._logger.warn(f"Failed to remove PID file: {e}")
 
         # Clean up socket file
         socket_path = f"{self._config.data_path}/{id}/firecracker.socket"
@@ -340,7 +340,7 @@ class ProcessManager:
                     self._logger.debug(f"Removed socket file: {socket_path}")
             except OSError as e:
                 if self._logger.verbose:
-                    self._logger.warning(f"Failed to remove socket file: {e}")
+                    self._logger.warn(f"Failed to remove socket file: {e}")
 
     def get_pid(self, id: str) -> tuple:
         """Get the PID of the Firecracker process.
