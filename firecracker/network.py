@@ -541,6 +541,45 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to get nftables rules: {str(e)}")
 
+    def _check_postrouting_exists(self, id: str) -> bool:
+        """Check if a POSTROUTING rule already exists for the given machine ID.
+
+        Args:
+            id (str): Machine ID to check for
+
+        Returns:
+            bool: True if POSTROUTING rule exists, False otherwise
+        """
+        try:
+            list_cmd = {"nftables": [{"list": {"table": {"family": "ip", "name": "nat"}}}]}
+            output = self._nft.json_cmd(list_cmd)
+            result = output[1]['nftables']
+            
+            postrouting_comment = f"machine_id={id}"
+            
+            for item in result:
+                if 'rule' not in item:
+                    continue
+                    
+                rule = item['rule']
+                chain = rule.get('chain', '').upper()
+                comment = rule.get('comment', '')
+                
+                if (rule.get('family') == 'ip' and 
+                    rule.get('table') == 'nat' and 
+                    chain == 'POSTROUTING' and 
+                    comment == postrouting_comment):
+                    if self._config.verbose:
+                        self._logger.debug(f"Found existing POSTROUTING rule for machine_id={id}")
+                    return True
+                    
+            return False
+            
+        except Exception as e:
+            if self._config.verbose:
+                self._logger.warn(f"Failed to check for existing POSTROUTING rule: {str(e)}")
+            return False
+
     def add_port_forward(self, id: str, host_ip: str, host_port: int, dest_ip: str, dest_port: int, protocol: str = "tcp"):
         """Port forward a port to a new IP and port.
 
@@ -554,14 +593,15 @@ class NetworkManager:
         Raises:
             NetworkError: If adding nftables port forwarding rule fails.
         """
-        # First check if the rules already exist
-        # existing_rules = self.get_port_forward_handles(host_ip, host_port, dest_ip, dest_port)
-
+        # First check if the PREROUTING rule already exists
         existing_rules = self.get_port_forward_by_comment(id, host_port, dest_port)
         if existing_rules:
             if self._config.verbose:
                 self._logger.info("Port forwarding rules already exist")
             return True
+
+        # Check if POSTROUTING rule already exists
+        postrouting_exists = self._check_postrouting_exists(id)
 
         # Create the rules
         rules = {
@@ -586,96 +626,104 @@ class NetworkManager:
                             "policy": "accept"
                         }
                     }
-                },
-                {
-                    "add": {
-                        "chain": {
-                            "family": "ip",
-                            "table": "nat",
-                            "name": "POSTROUTING",
-                            "type": "nat",
-                            "hook": "postrouting",
-                            "prio": 100,
-                            "policy": "accept"
-                        }
-                    }
-                },
-                {
-                    "add": {
-                        "rule": {
-                            "family": "ip",
-                            "table": "nat",
-                            "chain": "PREROUTING",
-                            "comment": f"machine_id={id} host_port={host_port} vm_port={dest_port}",
-                            "expr": [
-                                {
-                                    "match": {
-                                        "op": "==",
-                                        "left": {
-                                            "payload": {
-                                                "protocol": "ip",
-                                                "field": "daddr"
-                                            }
-                                        },
-                                        "right": host_ip
-                                    }
-                                },
-                                {
-                                    "match": {
-                                        "op": "==",
-                                        "left": {
-                                            "payload": {
-                                                "protocol": protocol,
-                                                "field": "dport"
-                                            }
-                                        },
-                                        "right": host_port
-                                    }
-                                },
-                                {
-                                    "dnat": {
-                                        "addr": dest_ip,
-                                        "port": dest_port
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                },
-                {
-                    "add": {
-                        "rule": {
-                            "family": "ip",
-                            "table": "nat",
-                            "chain": "POSTROUTING",
-                            "comment": f"machine_id={id}",
-                            "expr": [
-                                {
-                                    "match": {
-                                        "op": "==",
-                                        "left": {
-                                            "payload": {
-                                                "protocol": "ip",
-                                                "field": "saddr"
-                                            }
-                                        },
-                                        "right": {
-                                            "prefix": {
-                                                "addr": dest_ip,
-                                                "len": 32
-                                            }
-                                        }
-                                    }
-                                },
-                                {
-                                    "masquerade": None
-                                }
-                            ]
-                        }
-                    }
                 }
             ]
         }
+
+        # Only add POSTROUTING chain if it doesn't exist
+        if not postrouting_exists:
+            rules["nftables"].append({
+                "add": {
+                    "chain": {
+                        "family": "ip",
+                        "table": "nat",
+                        "name": "POSTROUTING",
+                        "type": "nat",
+                        "hook": "postrouting",
+                        "prio": 100,
+                        "policy": "accept"
+                    }
+                }
+            })
+
+        # Add PREROUTING rule
+        rules["nftables"].append({
+            "add": {
+                "rule": {
+                    "family": "ip",
+                    "table": "nat",
+                    "chain": "PREROUTING",
+                    "comment": f"machine_id={id} host_port={host_port} vm_port={dest_port}",
+                    "expr": [
+                        {
+                            "match": {
+                                "op": "==",
+                                "left": {
+                                    "payload": {
+                                        "protocol": "ip",
+                                        "field": "daddr"
+                                    }
+                                },
+                                "right": host_ip
+                            }
+                        },
+                        {
+                            "match": {
+                                "op": "==",
+                                "left": {
+                                    "payload": {
+                                        "protocol": protocol,
+                                        "field": "dport"
+                                    }
+                                },
+                                "right": host_port
+                            }
+                        },
+                        {
+                            "dnat": {
+                                "addr": dest_ip,
+                                "port": dest_port
+                            }
+                        }
+                    ]
+                }
+            }
+        })
+
+        # Only add POSTROUTING rule if it doesn't already exist
+        if not postrouting_exists:
+            rules["nftables"].append({
+                "add": {
+                    "rule": {
+                        "family": "ip",
+                        "table": "nat",
+                        "chain": "POSTROUTING",
+                        "comment": f"machine_id={id}",
+                        "expr": [
+                            {
+                                "match": {
+                                    "op": "==",
+                                    "left": {
+                                        "payload": {
+                                            "protocol": "ip",
+                                            "field": "saddr"
+                                        }
+                                    },
+                                    "right": {
+                                        "prefix": {
+                                            "addr": dest_ip,
+                                            "len": 32
+                                        }
+                                    }
+                                }
+                            },
+                            {
+                                "masquerade": None
+                            }
+                        ]
+                    }
+                }
+            })
 
         try:
             for rule in rules["nftables"]:
