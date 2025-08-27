@@ -501,7 +501,7 @@ class NetworkManager:
             dest_port (int): Destination port to search for
 
         Returns:
-            dict: Dictionary containing handles for prerouting and postrouting rules.
+            dict: Dictionary containing handles for prerouting rules only.
 
         Raises:
             NetworkError: If retrieving nftables rules fails.
@@ -516,7 +516,6 @@ class NetworkManager:
             rules = {}
 
             prerouting_comment = f"machine_id={id} host_port={host_port} vm_port={dest_port}"
-            postrouting_comment = f"machine_id={id}"
 
             for item in result:
                 if 'rule' not in item:
@@ -526,7 +525,7 @@ class NetworkManager:
                 chain = rule.get('chain', '').upper()  # Normalize chain name to uppercase
                 comment = rule.get('comment', '')
 
-                # Check for PREROUTING rules with matching comment
+                # Check for PREROUTING rules with matching comment only
                 if rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'PREROUTING':
                     if comment == prerouting_comment:
                         if self._config.verbose:
@@ -534,16 +533,8 @@ class NetworkManager:
                             self._logger.debug(f"Rule details: {rule}")
                         rules['prerouting'] = rule['handle']
 
-                # Check for POSTROUTING rules with matching comment
-                elif rule.get('family') == 'ip' and rule.get('table') == 'nat' and chain == 'POSTROUTING':
-                    if comment == postrouting_comment:
-                        if self._config.verbose:
-                            self._logger.info(f"Found postrouting rule with matching comment: {comment}")
-                            self._logger.debug(f"Rule details: {rule}")
-                        rules['postrouting'] = rule['handle']
-
             if not rules and self._config.verbose:
-                self._logger.info(f"No port forwarding rules found for machine_id={id} host_port={host_port}")
+                self._logger.info(f"No port forwarding rules found for machine_id={id} host_port={host_port} vm_port={dest_port}")
 
             return rules
 
@@ -570,7 +561,7 @@ class NetworkManager:
         if existing_rules:
             if self._config.verbose:
                 self._logger.info("Port forwarding rules already exist")
-            return
+            return True
 
         # Create the rules
         rules = {
