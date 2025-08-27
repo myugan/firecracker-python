@@ -476,7 +476,9 @@ class NetworkManager:
                         if 'masquerade' in e:
                             has_masquerade = True
 
-                    if has_saddr_match and has_masquerade and comment == f"machine_id={id}":
+                    # Note: This function is not currently used, but if it were, it would need an 'id' parameter
+                    # For now, we'll just check for masquerade rules without machine_id matching
+                    if has_saddr_match and has_masquerade:
                         if self._config.verbose:
                             self._logger.debug(f"Found matching postrouting masquerade rule {rule}")
                             self._logger.info(f"Found postrouting rule with handle {rule['handle']}")
@@ -490,12 +492,13 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to get nftables rules: {str(e)}")
 
-    def get_port_forward_by_comment(self, id: str, host_port: int):
+    def get_port_forward_by_comment(self, id: str, host_port: int, dest_port: int):
         """Get port forwarding rules by matching the comment pattern.
 
         Args:
             id (str): Machine ID to search for
             host_port (int): Host port to search for
+            dest_port (int): Destination port to search for
 
         Returns:
             dict: Dictionary containing handles for prerouting and postrouting rules.
@@ -511,7 +514,8 @@ class NetworkManager:
             output = self._nft.json_cmd(list_cmd)
             result = output[1]['nftables']
             rules = {}
-            prerouting_comment = f"machine_id={id} host_port={host_port}"
+
+            prerouting_comment = f"machine_id={id} host_port={host_port} vm_port={dest_port}"
             postrouting_comment = f"machine_id={id}"
 
             for item in result:
@@ -562,7 +566,7 @@ class NetworkManager:
         # First check if the rules already exist
         # existing_rules = self.get_port_forward_handles(host_ip, host_port, dest_ip, dest_port)
 
-        existing_rules = self.get_port_forward_by_comment(id, host_port)
+        existing_rules = self.get_port_forward_by_comment(id, host_port, dest_port)
         if existing_rules:
             if self._config.verbose:
                 self._logger.info("Port forwarding rules already exist")
@@ -611,7 +615,7 @@ class NetworkManager:
                             "family": "ip",
                             "table": "nat",
                             "chain": "PREROUTING",
-                            "comment": f"machine_id={id} host_port={host_port}",
+                            "comment": f"machine_id={id} host_port={host_port} vm_port={dest_port}",
                             "expr": [
                                 {
                                     "match": {
@@ -764,12 +768,13 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"Failed to delete masquerade rule: {str(e)}")
 
-    def delete_port_forward(self, id: str, host_port: int):
+    def delete_port_forward(self, id: str, host_port: int, dest_port: int):
         """Delete port forwarding rules.
 
         Args:
-            host_port (int): Port being forwarded.
-            machine_id (str): ID of the machine for which port forwarding is being deleted.
+            id (str): Machine ID for which port forwarding is being deleted.
+            host_port (int): Host port being forwarded.
+            dest_port (int): Destination port being forwarded to.
 
         Raises:
             NetworkError: If deleting port forwarding rules fails.
@@ -791,7 +796,9 @@ class NetworkManager:
                 rule = item['rule']
                 comment = rule.get('comment', '')
                 
-                if f"machine_id={id} host_port={host_port}" in comment:
+                comment_matches = f"machine_id={id} host_port={host_port} vm_port={dest_port}" in comment
+                
+                if comment_matches:
                     chain = rule.get('chain', '').upper()
                     handle = rule['handle']
                     
