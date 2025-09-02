@@ -1248,7 +1248,7 @@ class MicroVM:
         dest_ports_list = [dest_ports] if isinstance(dest_ports, int) else dest_ports
 
         for host_port, dest_port in zip(host_ports_list, dest_ports_list):
-            self._network.delete_port_forward(vmm_id, host_port)
+            self._network.delete_port_forward(vmm_id, host_port, dest_port)
             if self._config.verbose:
                 self._logger.debug(f"Removed {host_port} -> {dest_port} from VMM {vmm_id}")
         
