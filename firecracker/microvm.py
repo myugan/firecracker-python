@@ -608,6 +608,7 @@ class MicroVM:
         """
         try:
             id = id if id else self._microvm_id
+            self._api = self._vmm.get_api(id)
 
             if action == "create":
                 if self._vmm.get_vmm_state(id) == "Paused":
