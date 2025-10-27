@@ -272,13 +272,15 @@ class MicroVM:
         except Exception as e:
             raise VMMError(f"Failed to build rootfs from Docker image: {str(e)}")
 
-    def create(self, snapshot: bool = False, memory_path: str = None, snapshot_path: str = None) -> dict:
+    def create(self, snapshot: bool = False, memory_path: str = None, snapshot_path: str = None, rootfs_path: str = None) -> dict:
         """Create a new microVM.
 
         Args:
             snapshot (bool, optional): Whether to create a snapshot of the microVM.
             memory_path (str, optional): Path to the memory file.
             snapshot_path (str, optional): Path to the snapshot file.
+            rootfs_path (str, optional): Path to the rootfs file. Used when loading from snapshot to override the
+                rootfs path saved in the snapshot metadata. If not provided, will use the default rootfs path.
 
         Returns:
             dict: Status message indicating the result of the create operation.
@@ -316,7 +318,7 @@ class MicroVM:
             if snapshot:
                 if not memory_path or not snapshot_path:
                     raise ValueError("memory_path and snapshot_path are required when snapshot is True")
-                self.snapshot(id=self._microvm_id, action="load", memory_path=memory_path, snapshot_path=snapshot_path)
+                self.snapshot(id=self._microvm_id, action="load", memory_path=memory_path, snapshot_path=snapshot_path, rootfs_path=rootfs_path)
             else:
                 self._configure_vmm_boot_source()
                 self._configure_vmm_root_drive()
@@ -597,7 +599,7 @@ class MicroVM:
         except Exception as e:
             raise VMMError(f"Failed to configure port forwarding: {str(e)}")
 
-    def snapshot(self, id=None, action: str = None, memory_path: str = None, snapshot_path: str = None):
+    def snapshot(self, id=None, action: str = None, memory_path: str = None, snapshot_path: str = None, rootfs_path: str = None):
         """Create a snapshot of the microVM.
         
         Args:
@@ -605,6 +607,9 @@ class MicroVM:
             action (str, optional): Action to perform on the snapshot.
             memory_path (str, optional): Path to the memory file. If not provided, uses the default memory path.
             snapshot_path (str, optional): Path to the snapshot file. If not provided, uses the default snapshot path.
+            rootfs_path (str, optional): Path to the rootfs file. If not provided, uses the default rootfs path.
+                This parameter is particularly important when loading snapshots to override the original rootfs path
+                that was saved in the snapshot metadata.
         """
         try:
             id = id if id else self._microvm_id
@@ -632,6 +637,21 @@ class MicroVM:
                     self._logger.info(f"Snapshot created for VMM {id}")
                 self._vmm.update_vmm_state(id, "Resumed")
             elif action == "load":
+                # Determine the rootfs path to use
+                if rootfs_path is None:
+                    # Use overlayfs logic to determine correct rootfs path
+                    if self._overlayfs and self._base_rootfs:
+                        rootfs_path = self._base_rootfs
+                    else:
+                        rootfs_path = self._rootfs_file
+                
+                # Verify rootfs file exists before attempting to load snapshot
+                if not os.path.exists(rootfs_path):
+                    raise FileNotFoundError(f"Rootfs file not found: {rootfs_path}")
+                
+                if self._config.verbose:
+                    self._logger.debug(f"Using rootfs path for snapshot load: {rootfs_path}")
+                
                 self._api.load_snapshot.put(
                     enable_diff_snapshots=True,
                     mem_backend={
@@ -640,6 +660,13 @@ class MicroVM:
                     },
                     snapshot_path=snapshot_path if snapshot_path is not None else self._snapshot_path,
                     resume_vm=True,
+                    backend_overrides=[
+                        {
+                            "backend_id": "rootfs",
+                            "backend_type": "File",
+                            "backend_path": rootfs_path
+                        }
+                    ],
                     network_overrides=[
                         {
                             "iface_id": self._iface_name,
