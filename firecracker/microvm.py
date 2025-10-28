@@ -3,6 +3,7 @@ import sys
 import tty
 import time
 import json
+import re
 import select
 import termios
 import docker
@@ -657,24 +658,81 @@ class MicroVM:
                 snapshot_file = snapshot_path if snapshot_path is not None else self._snapshot_path
                 self._prepare_snapshot_rootfs_symlink(snapshot_file, rootfs_path)
                 
-                self._api.load_snapshot.put(
-                    enable_diff_snapshots=True,
-                    mem_backend={
-                        "backend_type": "File",
-                        "backend_path": memory_path if memory_path is not None else self._mem_file_path
-                    },
-                    snapshot_path=snapshot_file,
-                    resume_vm=True,
-                    network_overrides=[
-                        {
-                            "iface_id": self._iface_name,
-                            "host_dev_name": self._host_dev_name
-                        }
-                    ]
-                )
-                if self._config.verbose:
-                    self._logger.debug(f"Snapshot loaded from {snapshot_file}")
-                    self._logger.info(f"Snapshot loaded for VMM {id}")
+                # Try to load the snapshot
+                try:
+                    self._api.load_snapshot.put(
+                        enable_diff_snapshots=True,
+                        mem_backend={
+                            "backend_type": "File",
+                            "backend_path": memory_path if memory_path is not None else self._mem_file_path
+                        },
+                        snapshot_path=snapshot_file,
+                        resume_vm=True,
+                        network_overrides=[
+                            {
+                                "iface_id": self._iface_name,
+                                "host_dev_name": self._host_dev_name
+                            }
+                        ]
+                    )
+                    if self._config.verbose:
+                        self._logger.debug(f"Snapshot loaded from {snapshot_file}")
+                        self._logger.info(f"Snapshot loaded for VMM {id}")
+                        
+                except Exception as load_error:
+                    # If load failed due to missing rootfs file, try to extract path from error and create symlink
+                    error_msg = str(load_error)
+                    if "No such file or directory" in error_msg and ".img" in error_msg:
+                        # Extract the expected path from error message
+                        # Error format: "... No such file or directory (os error 2) /path/to/file.img"
+                        match = re.search(r'(\S+\.img)', error_msg)
+                        if match:
+                            expected_path = match.group(1)
+                            if self._config.verbose:
+                                self._logger.info(f"Snapshot load failed: rootfs not found at {expected_path}")
+                                self._logger.info(f"Creating symlink from error path: {expected_path} -> {rootfs_path}")
+                            
+                            # Create symlink and retry
+                            try:
+                                expected_dir = os.path.dirname(expected_path)
+                                if not os.path.exists(expected_dir):
+                                    os.makedirs(expected_dir, mode=0o755, exist_ok=True)
+                                
+                                # Remove existing file/symlink if needed
+                                if os.path.exists(expected_path) or os.path.islink(expected_path):
+                                    os.remove(expected_path)
+                                
+                                # Create symlink
+                                os.symlink(rootfs_path, expected_path)
+                                if self._config.verbose:
+                                    self._logger.info(f"Created symlink: {expected_path} -> {rootfs_path}")
+                                
+                                # Retry snapshot load
+                                self._api.load_snapshot.put(
+                                    enable_diff_snapshots=True,
+                                    mem_backend={
+                                        "backend_type": "File",
+                                        "backend_path": memory_path if memory_path is not None else self._mem_file_path
+                                    },
+                                    snapshot_path=snapshot_file,
+                                    resume_vm=True,
+                                    network_overrides=[
+                                        {
+                                            "iface_id": self._iface_name,
+                                            "host_dev_name": self._host_dev_name
+                                        }
+                                    ]
+                                )
+                                if self._config.verbose:
+                                    self._logger.info(f"Snapshot loaded successfully after symlink creation")
+                            except Exception as retry_error:
+                                raise VMMError(f"Failed to load snapshot even after creating symlink: {str(retry_error)}")
+                        else:
+                            # Could not extract path from error, re-raise original error
+                            raise
+                    else:
+                        # Different error, re-raise
+                        raise
             else:
                 raise ValueError("Invalid action. Must be 'create' or 'load'")
 
@@ -691,13 +749,10 @@ class MicroVM:
         Args:
             snapshot_path (str): Path to the snapshot file
             target_rootfs_path (str): Actual path to the rootfs file to use
-            
-        Raises:
-            VMMError: If snapshot parsing or symlink creation fails
         """
         try:
             # Read and parse snapshot file to find the expected rootfs path
-            with open(snapshot_path, 'r') as f:
+            with open(snapshot_path, 'r', encoding='utf-8') as f:
                 snapshot_data = json.load(f)
             
             # Look for block devices in the snapshot
@@ -745,20 +800,24 @@ class MicroVM:
                                 self._logger.debug(f"Rootfs paths match, no symlink needed: {target_rootfs_path}")
                         else:
                             if self._config.verbose:
-                                self._logger.warning("Could not find path_on_host in snapshot block device")
+                                self._logger.warn("Could not find path_on_host in snapshot block device")
             else:
                 if self._config.verbose:
-                    self._logger.warning("No block_devices found in snapshot, skipping symlink creation")
+                    self._logger.warn("No block_devices found in snapshot, skipping symlink creation")
                     
-        except json.JSONDecodeError as e:
-            # Snapshot might be in binary format, try a different approach
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # Snapshot is in binary format, cannot parse to extract rootfs path
+            # This is normal for some Firecracker versions
+            # Silently skip symlink creation and let the load attempt proceed
             if self._config.verbose:
-                self._logger.warning(f"Could not parse snapshot as JSON: {e}. Snapshot might be in binary format.")
-                self._logger.warning("Attempting to load snapshot without symlink preparation")
+                self._logger.warn(f"Snapshot is in binary format, cannot extract rootfs path for symlink creation")
+                self._logger.warn("Proceeding without symlink - snapshot load may fail if paths don't match")
         except Exception as e:
+            # Other errors during symlink preparation - log but don't fail
+            # Let the snapshot load attempt proceed anyway
             if self._config.verbose:
-                self._logger.warning(f"Error preparing rootfs symlink: {e}")
-                self._logger.warning("Attempting to load snapshot without symlink preparation")
+                self._logger.warn(f"Error preparing rootfs symlink: {e}")
+                self._logger.warn("Proceeding without symlink - snapshot load may fail if paths don't match")
 
     def _parse_ports(self, port_value, default_value=None):
         """Parse port values from various input formats.
