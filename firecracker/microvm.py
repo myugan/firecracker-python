@@ -320,6 +320,10 @@ class MicroVM:
                 if not memory_path or not snapshot_path:
                     raise ValueError("memory_path and snapshot_path are required when snapshot is True")
                 self.snapshot(id=self._microvm_id, action="load", memory_path=memory_path, snapshot_path=snapshot_path, rootfs_path=rootfs_path)
+                # Note: load_snapshot with resume_vm=True already starts the VM
+                # No need to call InstanceStart again
+                if self._config.verbose:
+                    self._logger.info(f"VMM {self._microvm_id} started from snapshot")
             else:
                 self._configure_vmm_boot_source()
                 self._configure_vmm_root_drive()
@@ -329,10 +333,11 @@ class MicroVM:
                     self._configure_vmm_mmds()
                 if self._vsock_enabled:
                     self._configure_vmm_vsock()
-
-            self._api.actions.put(action_type="InstanceStart")
-            if self._config.verbose:
-                self._logger.info(f"VMM {self._microvm_id} started")
+                
+                # Start the VM (only for non-snapshot boot)
+                self._api.actions.put(action_type="InstanceStart")
+                if self._config.verbose:
+                    self._logger.info(f"VMM {self._microvm_id} started")
 
             if self._expose_ports:
                 if not self._host_port or not self._dest_port:
@@ -707,6 +712,29 @@ class MicroVM:
                                 if self._config.verbose:
                                     self._logger.info(f"Created symlink: {expected_path} -> {rootfs_path}")
                                 
+                                # Firecracker process crashed after first failed load attempt
+                                # Need to restart it before retry
+                                if self._config.verbose:
+                                    self._logger.info(f"Restarting Firecracker process for retry...")
+                                
+                                # Close old API connection
+                                try:
+                                    self._api.close()
+                                except:
+                                    pass
+                                
+                                # Kill old Firecracker process if it's still running
+                                try:
+                                    self._process.kill(id)
+                                except:
+                                    pass
+                                
+                                # Start new Firecracker process
+                                self._run_firecracker()
+                                
+                                # Get new API connection
+                                self._api = self._vmm.get_api(id)
+                                
                                 # Retry snapshot load
                                 self._api.load_snapshot.put(
                                     enable_diff_snapshots=True,
@@ -724,7 +752,7 @@ class MicroVM:
                                     ]
                                 )
                                 if self._config.verbose:
-                                    self._logger.info(f"Snapshot loaded successfully after symlink creation")
+                                    self._logger.info(f"Snapshot loaded successfully after symlink creation and process restart")
                             except Exception as retry_error:
                                 raise VMMError(f"Failed to load snapshot even after creating symlink: {str(retry_error)}")
                         else:
