@@ -652,21 +652,19 @@ class MicroVM:
                 if self._config.verbose:
                     self._logger.debug(f"Using rootfs path for snapshot load: {rootfs_path}")
                 
+                # Parse snapshot to find expected rootfs path and create symlink if needed
+                # This is a workaround for older Firecracker versions that don't support backend_overrides
+                snapshot_file = snapshot_path if snapshot_path is not None else self._snapshot_path
+                self._prepare_snapshot_rootfs_symlink(snapshot_file, rootfs_path)
+                
                 self._api.load_snapshot.put(
                     enable_diff_snapshots=True,
                     mem_backend={
                         "backend_type": "File",
                         "backend_path": memory_path if memory_path is not None else self._mem_file_path
                     },
-                    snapshot_path=snapshot_path if snapshot_path is not None else self._snapshot_path,
+                    snapshot_path=snapshot_file,
                     resume_vm=True,
-                    backend_overrides=[
-                        {
-                            "backend_id": "rootfs",
-                            "backend_type": "File",
-                            "backend_path": rootfs_path
-                        }
-                    ],
                     network_overrides=[
                         {
                             "iface_id": self._iface_name,
@@ -675,13 +673,92 @@ class MicroVM:
                     ]
                 )
                 if self._config.verbose:
-                    self._logger.debug(f"Snapshot loaded from {snapshot_path if snapshot_path is not None else self._snapshot_path}")
+                    self._logger.debug(f"Snapshot loaded from {snapshot_file}")
                     self._logger.info(f"Snapshot loaded for VMM {id}")
             else:
                 raise ValueError("Invalid action. Must be 'create' or 'load'")
 
         except Exception as e:
             raise VMMError(f"Failed to create snapshot: {str(e)}")
+
+    def _prepare_snapshot_rootfs_symlink(self, snapshot_path: str, target_rootfs_path: str):
+        """Prepare symlink from snapshot's expected rootfs path to actual rootfs path.
+        
+        This is a workaround for Firecracker versions that don't support backend_overrides.
+        It parses the snapshot file to find the expected rootfs path and creates a symlink
+        from that path to the actual rootfs file.
+        
+        Args:
+            snapshot_path (str): Path to the snapshot file
+            target_rootfs_path (str): Actual path to the rootfs file to use
+            
+        Raises:
+            VMMError: If snapshot parsing or symlink creation fails
+        """
+        try:
+            # Read and parse snapshot file to find the expected rootfs path
+            with open(snapshot_path, 'r') as f:
+                snapshot_data = json.load(f)
+            
+            # Look for block devices in the snapshot
+            if 'block_devices' in snapshot_data:
+                for device in snapshot_data['block_devices']:
+                    # Find the rootfs device
+                    if device.get('drive_id') == 'rootfs' or device.get('is_root_device'):
+                        expected_path = device.get('path_on_host')
+                        
+                        if expected_path and expected_path != target_rootfs_path:
+                            # The snapshot expects a different path
+                            if self._config.verbose:
+                                self._logger.info(f"Snapshot expects rootfs at: {expected_path}")
+                                self._logger.info(f"Creating symlink to actual rootfs: {target_rootfs_path}")
+                            
+                            # Create parent directories if they don't exist
+                            expected_dir = os.path.dirname(expected_path)
+                            if not os.path.exists(expected_dir):
+                                os.makedirs(expected_dir, mode=0o755, exist_ok=True)
+                                if self._config.verbose:
+                                    self._logger.debug(f"Created directory: {expected_dir}")
+                            
+                            # Remove existing file/symlink if it exists and is not the target
+                            if os.path.exists(expected_path) or os.path.islink(expected_path):
+                                # Check if it's already a valid symlink to our target
+                                if os.path.islink(expected_path) and os.readlink(expected_path) == target_rootfs_path:
+                                    if self._config.verbose:
+                                        self._logger.debug(f"Symlink already exists and is correct: {expected_path} -> {target_rootfs_path}")
+                                    return
+                                
+                                # Remove the existing file/symlink
+                                os.remove(expected_path)
+                                if self._config.verbose:
+                                    self._logger.debug(f"Removed existing file/symlink: {expected_path}")
+                            
+                            # Create the symlink
+                            os.symlink(target_rootfs_path, expected_path)
+                            if self._config.verbose:
+                                self._logger.info(f"Created symlink: {expected_path} -> {target_rootfs_path}")
+                            
+                            break
+                        elif expected_path == target_rootfs_path:
+                            # Paths match, no symlink needed
+                            if self._config.verbose:
+                                self._logger.debug(f"Rootfs paths match, no symlink needed: {target_rootfs_path}")
+                        else:
+                            if self._config.verbose:
+                                self._logger.warning("Could not find path_on_host in snapshot block device")
+            else:
+                if self._config.verbose:
+                    self._logger.warning("No block_devices found in snapshot, skipping symlink creation")
+                    
+        except json.JSONDecodeError as e:
+            # Snapshot might be in binary format, try a different approach
+            if self._config.verbose:
+                self._logger.warning(f"Could not parse snapshot as JSON: {e}. Snapshot might be in binary format.")
+                self._logger.warning("Attempting to load snapshot without symlink preparation")
+        except Exception as e:
+            if self._config.verbose:
+                self._logger.warning(f"Error preparing rootfs symlink: {e}")
+                self._logger.warning("Attempting to load snapshot without symlink preparation")
 
     def _parse_ports(self, port_value, default_value=None):
         """Parse port values from various input formats.
