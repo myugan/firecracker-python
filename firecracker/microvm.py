@@ -651,16 +651,45 @@ class MicroVM:
                     else:
                         rootfs_path = self._rootfs_file
                 
-                # Verify rootfs file exists before attempting to load snapshot
+                # Verify required files exist before attempting to load snapshot
+                snapshot_file = snapshot_path if snapshot_path is not None else self._snapshot_path
+                mem_file = memory_path if memory_path is not None else self._mem_file_path
+                
+                # Validate snapshot file
+                if not os.path.exists(snapshot_file):
+                    raise FileNotFoundError(f"Snapshot file not found: {snapshot_file}")
+                
+                # Validate memory file
+                if not os.path.exists(mem_file):
+                    raise FileNotFoundError(f"Memory file not found: {mem_file}")
+                
+                # Validate rootfs file
                 if not os.path.exists(rootfs_path):
                     raise FileNotFoundError(f"Rootfs file not found: {rootfs_path}")
+                
+                # Check file sizes and provide helpful info
+                snapshot_size = os.path.getsize(snapshot_file)
+                mem_size = os.path.getsize(mem_file)
+                rootfs_size = os.path.getsize(rootfs_path)
+                
+                if self._config.verbose:
+                    self._logger.debug(f"Snapshot file: {snapshot_file} ({snapshot_size} bytes)")
+                    self._logger.debug(f"Memory file: {mem_file} ({mem_size} bytes)")
+                    self._logger.debug(f"Rootfs file: {rootfs_path} ({rootfs_size} bytes)")
+                
+                # Validate memory file is not empty or too small
+                if mem_size < 1024:  # Less than 1KB is suspicious
+                    raise ValueError(f"Memory file appears to be corrupt or incomplete: {mem_file} (size: {mem_size} bytes)")
+                
+                # Validate snapshot file is not empty
+                if snapshot_size < 100:  # Less than 100 bytes is suspicious
+                    raise ValueError(f"Snapshot file appears to be corrupt or incomplete: {snapshot_file} (size: {snapshot_size} bytes)")
                 
                 if self._config.verbose:
                     self._logger.debug(f"Using rootfs path for snapshot load: {rootfs_path}")
                 
                 # Parse snapshot to find expected rootfs path and create symlink if needed
                 # This is a workaround for older Firecracker versions that don't support backend_overrides
-                snapshot_file = snapshot_path if snapshot_path is not None else self._snapshot_path
                 self._prepare_snapshot_rootfs_symlink(snapshot_file, rootfs_path)
                 
                 # Try to load the snapshot
@@ -685,8 +714,25 @@ class MicroVM:
                         self._logger.info(f"Snapshot loaded for VMM {id}")
                         
                 except Exception as load_error:
-                    # If load failed due to missing rootfs file, try to extract path from error and create symlink
                     error_msg = str(load_error)
+                    
+                    # Check for memory file corruption/truncation error
+                    if "file offset and length is greater" in error_msg or "Cannot create mmap region" in error_msg:
+                        # Memory file is corrupt, truncated, or incompatible
+                        raise VMMError(
+                            f"Memory file is corrupt, truncated, or incompatible with snapshot.\n"
+                            f"  Memory file: {mem_file} (size: {mem_size} bytes)\n"
+                            f"  Snapshot file: {snapshot_file} (size: {snapshot_size} bytes)\n"
+                            f"  Error: {error_msg}\n\n"
+                            f"Possible causes:\n"
+                            f"  1. Memory file was not fully written during snapshot creation\n"
+                            f"  2. Memory file was truncated or corrupted\n"
+                            f"  3. Snapshot and memory files are from different snapshots\n"
+                            f"  4. Disk was full during snapshot creation\n\n"
+                            f"Solution: Re-create the snapshot from the source VM."
+                        )
+                    
+                    # If load failed due to missing rootfs file, try to extract path from error and create symlink
                     if "No such file or directory" in error_msg and ".img" in error_msg:
                         # Extract the expected path from error message
                         # Error format: "... No such file or directory (os error 2) /path/to/file.img"
