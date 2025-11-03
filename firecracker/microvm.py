@@ -3,6 +3,7 @@ import sys
 import tty
 import time
 import json
+import re
 import select
 import termios
 import docker
@@ -272,13 +273,15 @@ class MicroVM:
         except Exception as e:
             raise VMMError(f"Failed to build rootfs from Docker image: {str(e)}")
 
-    def create(self, snapshot: bool = False, memory_path: str = None, snapshot_path: str = None) -> dict:
+    def create(self, snapshot: bool = False, memory_path: str = None, snapshot_path: str = None, rootfs_path: str = None) -> dict:
         """Create a new microVM.
 
         Args:
             snapshot (bool, optional): Whether to create a snapshot of the microVM.
             memory_path (str, optional): Path to the memory file.
             snapshot_path (str, optional): Path to the snapshot file.
+            rootfs_path (str, optional): Path to the rootfs file. Used when loading from snapshot to override the
+                rootfs path saved in the snapshot metadata. If not provided, will use the default rootfs path.
 
         Returns:
             dict: Status message indicating the result of the create operation.
@@ -316,7 +319,11 @@ class MicroVM:
             if snapshot:
                 if not memory_path or not snapshot_path:
                     raise ValueError("memory_path and snapshot_path are required when snapshot is True")
-                self.snapshot(id=self._microvm_id, action="load", memory_path=memory_path, snapshot_path=snapshot_path)
+                self.snapshot(id=self._microvm_id, action="load", memory_path=memory_path, snapshot_path=snapshot_path, rootfs_path=rootfs_path)
+                # Note: load_snapshot with resume_vm=True already starts the VM
+                # No need to call InstanceStart again
+                if self._config.verbose:
+                    self._logger.info(f"VMM {self._microvm_id} started from snapshot")
             else:
                 self._configure_vmm_boot_source()
                 self._configure_vmm_root_drive()
@@ -326,10 +333,11 @@ class MicroVM:
                     self._configure_vmm_mmds()
                 if self._vsock_enabled:
                     self._configure_vmm_vsock()
-
-            self._api.actions.put(action_type="InstanceStart")
-            if self._config.verbose:
-                self._logger.info(f"VMM {self._microvm_id} started")
+                
+                # Start the VM (only for non-snapshot boot)
+                self._api.actions.put(action_type="InstanceStart")
+                if self._config.verbose:
+                    self._logger.info(f"VMM {self._microvm_id} started")
 
             if self._expose_ports:
                 if not self._host_port or not self._dest_port:
@@ -597,7 +605,7 @@ class MicroVM:
         except Exception as e:
             raise VMMError(f"Failed to configure port forwarding: {str(e)}")
 
-    def snapshot(self, id=None, action: str = None, memory_path: str = None, snapshot_path: str = None):
+    def snapshot(self, id=None, action: str = None, memory_path: str = None, snapshot_path: str = None, rootfs_path: str = None):
         """Create a snapshot of the microVM.
         
         Args:
@@ -605,6 +613,9 @@ class MicroVM:
             action (str, optional): Action to perform on the snapshot.
             memory_path (str, optional): Path to the memory file. If not provided, uses the default memory path.
             snapshot_path (str, optional): Path to the snapshot file. If not provided, uses the default snapshot path.
+            rootfs_path (str, optional): Path to the rootfs file. If not provided, uses the default rootfs path.
+                This parameter is particularly important when loading snapshots to override the original rootfs path
+                that was saved in the snapshot metadata.
         """
         try:
             id = id if id else self._microvm_id
@@ -632,29 +643,255 @@ class MicroVM:
                     self._logger.info(f"Snapshot created for VMM {id}")
                 self._vmm.update_vmm_state(id, "Resumed")
             elif action == "load":
-                self._api.load_snapshot.put(
-                    enable_diff_snapshots=True,
-                    mem_backend={
-                        "backend_type": "File",
-                        "backend_path": memory_path if memory_path is not None else self._mem_file_path
-                    },
-                    snapshot_path=snapshot_path if snapshot_path is not None else self._snapshot_path,
-                    resume_vm=True,
-                    network_overrides=[
-                        {
-                            "iface_id": self._iface_name,
-                            "host_dev_name": self._host_dev_name
-                        }
-                    ]
-                )
+                # Determine the rootfs path to use
+                if rootfs_path is None:
+                    # Use overlayfs logic to determine correct rootfs path
+                    if self._overlayfs and self._base_rootfs:
+                        rootfs_path = self._base_rootfs
+                    else:
+                        rootfs_path = self._rootfs_file
+                
+                # Verify required files exist before attempting to load snapshot
+                snapshot_file = snapshot_path if snapshot_path is not None else self._snapshot_path
+                mem_file = memory_path if memory_path is not None else self._mem_file_path
+                
+                # Validate snapshot file
+                if not os.path.exists(snapshot_file):
+                    raise FileNotFoundError(f"Snapshot file not found: {snapshot_file}")
+                
+                # Validate memory file
+                if not os.path.exists(mem_file):
+                    raise FileNotFoundError(f"Memory file not found: {mem_file}")
+                
+                # Validate rootfs file
+                if not os.path.exists(rootfs_path):
+                    raise FileNotFoundError(f"Rootfs file not found: {rootfs_path}")
+                
+                # Check file sizes and provide helpful info
+                snapshot_size = os.path.getsize(snapshot_file)
+                mem_size = os.path.getsize(mem_file)
+                rootfs_size = os.path.getsize(rootfs_path)
+                
                 if self._config.verbose:
-                    self._logger.debug(f"Snapshot loaded from {snapshot_path if snapshot_path is not None else self._snapshot_path}")
-                    self._logger.info(f"Snapshot loaded for VMM {id}")
+                    self._logger.debug(f"Snapshot file: {snapshot_file} ({snapshot_size} bytes)")
+                    self._logger.debug(f"Memory file: {mem_file} ({mem_size} bytes)")
+                    self._logger.debug(f"Rootfs file: {rootfs_path} ({rootfs_size} bytes)")
+                
+                # Validate memory file is not empty or too small
+                if mem_size < 1024:  # Less than 1KB is suspicious
+                    raise ValueError(f"Memory file appears to be corrupt or incomplete: {mem_file} (size: {mem_size} bytes)")
+                
+                # Validate snapshot file is not empty
+                if snapshot_size < 100:  # Less than 100 bytes is suspicious
+                    raise ValueError(f"Snapshot file appears to be corrupt or incomplete: {snapshot_file} (size: {snapshot_size} bytes)")
+                
+                if self._config.verbose:
+                    self._logger.debug(f"Using rootfs path for snapshot load: {rootfs_path}")
+                
+                # Parse snapshot to find expected rootfs path and create symlink if needed
+                # This is a workaround for older Firecracker versions that don't support backend_overrides
+                self._prepare_snapshot_rootfs_symlink(snapshot_file, rootfs_path)
+                
+                # Try to load the snapshot
+                try:
+                    self._api.load_snapshot.put(
+                        enable_diff_snapshots=True,
+                        mem_backend={
+                            "backend_type": "File",
+                            "backend_path": memory_path if memory_path is not None else self._mem_file_path
+                        },
+                        snapshot_path=snapshot_file,
+                        resume_vm=True,
+                        network_overrides=[
+                            {
+                                "iface_id": self._iface_name,
+                                "host_dev_name": self._host_dev_name
+                            }
+                        ]
+                    )
+                    if self._config.verbose:
+                        self._logger.debug(f"Snapshot loaded from {snapshot_file}")
+                        self._logger.info(f"Snapshot loaded for VMM {id}")
+                        
+                except Exception as load_error:
+                    error_msg = str(load_error)
+                    
+                    # Check for memory file corruption/truncation error
+                    if "file offset and length is greater" in error_msg or "Cannot create mmap region" in error_msg:
+                        # Memory file is corrupt, truncated, or incompatible
+                        raise VMMError(
+                            f"Memory file is corrupt, truncated, or incompatible with snapshot.\n"
+                            f"  Memory file: {mem_file} (size: {mem_size} bytes)\n"
+                            f"  Snapshot file: {snapshot_file} (size: {snapshot_size} bytes)\n"
+                            f"  Error: {error_msg}\n\n"
+                            f"Possible causes:\n"
+                            f"  1. Memory file was not fully written during snapshot creation\n"
+                            f"  2. Memory file was truncated or corrupted\n"
+                            f"  3. Snapshot and memory files are from different snapshots\n"
+                            f"  4. Disk was full during snapshot creation\n\n"
+                            f"Solution: Re-create the snapshot from the source VM."
+                        )
+                    
+                    # If load failed due to missing rootfs file, try to extract path from error and create symlink
+                    if "No such file or directory" in error_msg and ".img" in error_msg:
+                        # Extract the expected path from error message
+                        # Error format: "... No such file or directory (os error 2) /path/to/file.img"
+                        match = re.search(r'(\S+\.img)', error_msg)
+                        if match:
+                            expected_path = match.group(1)
+                            if self._config.verbose:
+                                self._logger.info(f"Snapshot load failed: rootfs not found at {expected_path}")
+                                self._logger.info(f"Creating symlink from error path: {expected_path} -> {rootfs_path}")
+                            
+                            # Create symlink and retry
+                            try:
+                                expected_dir = os.path.dirname(expected_path)
+                                if not os.path.exists(expected_dir):
+                                    os.makedirs(expected_dir, mode=0o755, exist_ok=True)
+                                
+                                # Remove existing file/symlink if needed
+                                if os.path.exists(expected_path) or os.path.islink(expected_path):
+                                    os.remove(expected_path)
+                                
+                                # Create symlink
+                                os.symlink(rootfs_path, expected_path)
+                                if self._config.verbose:
+                                    self._logger.info(f"Created symlink: {expected_path} -> {rootfs_path}")
+                                
+                                # Firecracker process crashed after first failed load attempt
+                                # Need to restart it before retry
+                                if self._config.verbose:
+                                    self._logger.info(f"Restarting Firecracker process for retry...")
+                                
+                                # Close old API connection
+                                try:
+                                    self._api.close()
+                                except:
+                                    pass
+                                
+                                # Kill old Firecracker process if it's still running
+                                try:
+                                    self._process.kill(id)
+                                except:
+                                    pass
+                                
+                                # Start new Firecracker process
+                                self._run_firecracker()
+                                
+                                # Get new API connection
+                                self._api = self._vmm.get_api(id)
+                                
+                                # Retry snapshot load
+                                self._api.load_snapshot.put(
+                                    enable_diff_snapshots=True,
+                                    mem_backend={
+                                        "backend_type": "File",
+                                        "backend_path": memory_path if memory_path is not None else self._mem_file_path
+                                    },
+                                    snapshot_path=snapshot_file,
+                                    resume_vm=True,
+                                    network_overrides=[
+                                        {
+                                            "iface_id": self._iface_name,
+                                            "host_dev_name": self._host_dev_name
+                                        }
+                                    ]
+                                )
+                                if self._config.verbose:
+                                    self._logger.info(f"Snapshot loaded successfully after symlink creation and process restart")
+                            except Exception as retry_error:
+                                raise VMMError(f"Failed to load snapshot even after creating symlink: {str(retry_error)}")
+                        else:
+                            # Could not extract path from error, re-raise original error
+                            raise
+                    else:
+                        # Different error, re-raise
+                        raise
             else:
                 raise ValueError("Invalid action. Must be 'create' or 'load'")
 
         except Exception as e:
             raise VMMError(f"Failed to create snapshot: {str(e)}")
+
+    def _prepare_snapshot_rootfs_symlink(self, snapshot_path: str, target_rootfs_path: str):
+        """Prepare symlink from snapshot's expected rootfs path to actual rootfs path.
+        
+        This is a workaround for Firecracker versions that don't support backend_overrides.
+        It parses the snapshot file to find the expected rootfs path and creates a symlink
+        from that path to the actual rootfs file.
+        
+        Args:
+            snapshot_path (str): Path to the snapshot file
+            target_rootfs_path (str): Actual path to the rootfs file to use
+        """
+        try:
+            # Read and parse snapshot file to find the expected rootfs path
+            with open(snapshot_path, 'r', encoding='utf-8') as f:
+                snapshot_data = json.load(f)
+            
+            # Look for block devices in the snapshot
+            if 'block_devices' in snapshot_data:
+                for device in snapshot_data['block_devices']:
+                    # Find the rootfs device
+                    if device.get('drive_id') == 'rootfs' or device.get('is_root_device'):
+                        expected_path = device.get('path_on_host')
+                        
+                        if expected_path and expected_path != target_rootfs_path:
+                            # The snapshot expects a different path
+                            if self._config.verbose:
+                                self._logger.info(f"Snapshot expects rootfs at: {expected_path}")
+                                self._logger.info(f"Creating symlink to actual rootfs: {target_rootfs_path}")
+                            
+                            # Create parent directories if they don't exist
+                            expected_dir = os.path.dirname(expected_path)
+                            if not os.path.exists(expected_dir):
+                                os.makedirs(expected_dir, mode=0o755, exist_ok=True)
+                                if self._config.verbose:
+                                    self._logger.debug(f"Created directory: {expected_dir}")
+                            
+                            # Remove existing file/symlink if it exists and is not the target
+                            if os.path.exists(expected_path) or os.path.islink(expected_path):
+                                # Check if it's already a valid symlink to our target
+                                if os.path.islink(expected_path) and os.readlink(expected_path) == target_rootfs_path:
+                                    if self._config.verbose:
+                                        self._logger.debug(f"Symlink already exists and is correct: {expected_path} -> {target_rootfs_path}")
+                                    return
+                                
+                                # Remove the existing file/symlink
+                                os.remove(expected_path)
+                                if self._config.verbose:
+                                    self._logger.debug(f"Removed existing file/symlink: {expected_path}")
+                            
+                            # Create the symlink
+                            os.symlink(target_rootfs_path, expected_path)
+                            if self._config.verbose:
+                                self._logger.info(f"Created symlink: {expected_path} -> {target_rootfs_path}")
+                            
+                            break
+                        elif expected_path == target_rootfs_path:
+                            # Paths match, no symlink needed
+                            if self._config.verbose:
+                                self._logger.debug(f"Rootfs paths match, no symlink needed: {target_rootfs_path}")
+                        else:
+                            if self._config.verbose:
+                                self._logger.warn("Could not find path_on_host in snapshot block device")
+            else:
+                if self._config.verbose:
+                    self._logger.warn("No block_devices found in snapshot, skipping symlink creation")
+                    
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # Snapshot is in binary format, cannot parse to extract rootfs path
+            # This is normal for some Firecracker versions
+            # Silently skip symlink creation and let the load attempt proceed
+            if self._config.verbose:
+                self._logger.warn(f"Snapshot is in binary format, cannot extract rootfs path for symlink creation")
+                self._logger.warn("Proceeding without symlink - snapshot load may fail if paths don't match")
+        except Exception as e:
+            # Other errors during symlink preparation - log but don't fail
+            # Let the snapshot load attempt proceed anyway
+            if self._config.verbose:
+                self._logger.warn(f"Error preparing rootfs symlink: {e}")
+                self._logger.warn("Proceeding without symlink - snapshot load may fail if paths don't match")
 
     def _parse_ports(self, port_value, default_value=None):
         """Parse port values from various input formats.
