@@ -1366,6 +1366,10 @@ class MicroVM:
             if self._config.verbose:
                 self._logger.debug(f"Formatting filesystem: {file} with size {size}")
 
+            run(f"e2fsck -f -y {file}")
+            if self._config.verbose:
+                self._logger.debug(f"Filesystem check completed for: {file}")
+
             tmp_dir = tempfile.mkdtemp()
             run(f"mount -o loop {file} {tmp_dir}")
 
@@ -1375,6 +1379,11 @@ class MicroVM:
             os.remove(tar_file)
             if self._config.verbose:
                 self._logger.debug(f"Removed tar file: {tar_file}")
+
+            run(f"umount {tmp_dir}")
+            os.rmdir(tmp_dir)
+            if self._config.verbose:
+                self._logger.debug(f"Unmounted and removed temporary directory: {tmp_dir}")
 
             if self._config.verbose:
                 self._logger.info("Build rootfs completed")

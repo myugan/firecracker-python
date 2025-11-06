@@ -727,9 +727,15 @@ class NetworkManager:
 
         try:
             for rule in rules["nftables"]:
-                rc, output, error = self._nft.json_cmd({"nftables": [rule]})
-                if rc != 0 and "File exists" not in str(error):
-                    raise NetworkError(f"Failed to add port forwarding rule: {error}")
+                rc, _, error = self._nft.json_cmd({"nftables": [rule]})
+                if rc != 0:
+                    error_str = str(error)
+                    ignore_errors = [
+                        "File exists",
+                        "already exists",
+                    ]
+                    if not any(err in error_str for err in ignore_errors):
+                        raise NetworkError(f"Failed to add port forwarding rule: {error}")
 
             if self._config.verbose:
                 self._logger.info(f"Added port forwarding rule: {host_ip}:{host_port} -> {dest_ip}:{dest_port}")
